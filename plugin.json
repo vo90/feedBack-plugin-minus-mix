@@ -1,0 +1,15 @@
+{
+  "id": "practice_mix_exporter",
+  "name": "Practice Mix Exporter",
+  "version": "0.4.0",
+  "description": "Create safe single-song or recursive batch practice feedpaks with selected instrument stems removed.",
+  "script": "screen.js",
+  "screen": "screen.html",
+  "styles": "assets/plugin.css",
+  "routes": "routes.py",
+  "category": "audio",
+  "nav": {
+    "label": "Practice Mixes",
+    "screen": "plugin-practice_mix_exporter"
+  }
+}

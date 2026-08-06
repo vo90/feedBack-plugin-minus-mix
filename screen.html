@@ -1,0 +1,169 @@
+<!-- Injected by the host into div#plugin-practice_mix_exporter.screen. -->
+<div class="practice-mix-exporter">
+  <header class="pmx-header">
+    <div>
+      <h1>Practice Mix Exporter</h1>
+      <p>Create a new single-stem feedpak with selected instrument audio removed. Your source feedpak is never changed.</p>
+    </div>
+    <span class="pmx-native-badge">Optional plugin</span>
+  </header>
+
+  <div id="pmx-engine" class="pmx-engine" aria-live="polite">
+    <span class="pmx-engine-dot"></span>
+    <span id="pmx-engine-text">Checking the Stem Splitter server…</span>
+    <button id="pmx-engine-refresh" class="pmx-engine-refresh" type="button">Refresh status</button>
+  </div>
+
+  <div class="pmx-tabs" role="tablist" aria-label="Export mode">
+    <button id="pmx-mode-single" class="pmx-tab active" type="button" role="tab" aria-selected="true">Single song</button>
+    <button id="pmx-mode-batch" class="pmx-tab" type="button" role="tab" aria-selected="false">Batch folder</button>
+  </div>
+
+  <div id="pmx-single-panel" role="tabpanel">
+
+  <section class="pmx-card">
+    <div class="pmx-step">1</div>
+    <div class="pmx-content">
+      <label for="pmx-search">Choose an original song</label>
+      <div class="pmx-row">
+        <input id="pmx-search" type="search" placeholder="Search artist or title" autocomplete="off">
+        <button id="pmx-refresh" class="pmx-button pmx-secondary" type="button">Refresh</button>
+      </div>
+      <select id="pmx-source" size="6" aria-label="Local feedpaks"></select>
+      <p id="pmx-source-help" class="pmx-help">Local single-stem and multi-stem feedpaks are shown. The selected source is always read-only.</p>
+      <div id="pmx-source-warning" class="pmx-warning" role="alert" hidden></div>
+    </div>
+  </section>
+
+  <section class="pmx-card">
+    <div class="pmx-step">2</div>
+    <div class="pmx-content">
+      <label>Audio to exclude</label>
+      <div id="pmx-stems" class="pmx-stems">
+        <p class="pmx-help">Choose a split song first.</p>
+      </div>
+      <p class="pmx-help">
+        This selects audio stems, not notation arrangements. Excluding Guitar removes the model's combined guitar audio;
+        lead and rhythm charts remain available to play.
+      </p>
+    </div>
+  </section>
+
+  <section class="pmx-card">
+    <div class="pmx-step">3</div>
+    <div class="pmx-content">
+      <label for="pmx-output">Output folder</label>
+      <div class="pmx-row">
+        <input id="pmx-output" type="text" readonly placeholder="Choose a folder">
+        <button id="pmx-browse" class="pmx-button pmx-secondary" type="button">Choose folder…</button>
+      </div>
+      <p class="pmx-help">A unique “No Guitar” style filename is created automatically. Existing files are never overwritten.</p>
+    </div>
+  </section>
+
+  <section class="pmx-summary" aria-live="polite">
+    <div>
+      <strong id="pmx-summary-title">Ready when you are</strong>
+      <p id="pmx-summary-detail">Select a song, at least one stem, and an output folder.</p>
+    </div>
+    <button id="pmx-export" class="pmx-button pmx-primary" type="button" disabled>Create practice feedpak</button>
+  </section>
+
+  <div id="pmx-status" class="pmx-status" role="status" aria-live="polite"></div>
+
+  <section id="pmx-single-progress" class="pmx-batch-progress" hidden aria-live="polite">
+    <div class="pmx-progress-heading">
+      <div>
+        <strong id="pmx-single-progress-title">Export queued</strong>
+        <p id="pmx-single-current" class="pmx-help"></p>
+      </div>
+      <button id="pmx-single-cancel" class="pmx-button pmx-danger" type="button">Cancel safely</button>
+    </div>
+    <progress id="pmx-single-progress-bar" max="1" value="0"></progress>
+  </section>
+  </div>
+
+  <div id="pmx-batch-panel" role="tabpanel" hidden>
+    <section class="pmx-batch-intro">
+      <h2>Batch folder conversion</h2>
+      <p>Recursively scan a folder and create compact practice feedpaks in a separate output tree. Processing is sequential for GPU stability; one bad file does not stop the queue.</p>
+    </section>
+
+    <section class="pmx-card">
+      <div class="pmx-step">1</div>
+      <div class="pmx-content">
+        <label for="pmx-batch-input">Source folder</label>
+        <div class="pmx-row">
+          <input id="pmx-batch-input" type="text" readonly placeholder="Choose the folder containing feedpaks">
+          <button id="pmx-batch-input-browse" class="pmx-button pmx-secondary" type="button">Choose folder…</button>
+        </div>
+        <label class="pmx-option"><input id="pmx-batch-recursive" type="checkbox" checked> Scan all subfolders</label>
+      </div>
+    </section>
+
+    <section class="pmx-card">
+      <div class="pmx-step">2</div>
+      <div class="pmx-content">
+        <label for="pmx-batch-output">Output folder</label>
+        <div class="pmx-row">
+          <input id="pmx-batch-output" type="text" readonly placeholder="Choose a different output folder">
+          <button id="pmx-batch-output-browse" class="pmx-button pmx-secondary" type="button">Choose folder…</button>
+        </div>
+        <p class="pmx-help">Subfolders are preserved. Sources are read-only and existing output files are never overwritten.</p>
+      </div>
+    </section>
+
+    <section class="pmx-card">
+      <div class="pmx-step">3</div>
+      <div class="pmx-content">
+        <label>Audio to exclude from every song</label>
+        <div id="pmx-batch-stems" class="pmx-stems">
+          <label class="pmx-stem"><input type="checkbox" value="guitar" checked><span>Guitar</span></label>
+          <label class="pmx-stem"><input type="checkbox" value="bass"><span>Bass</span></label>
+          <label class="pmx-stem"><input type="checkbox" value="drums"><span>Drums</span></label>
+          <label class="pmx-stem"><input type="checkbox" value="vocals"><span>Vocals</span></label>
+          <label class="pmx-stem"><input type="checkbox" value="piano"><span>Piano</span></label>
+          <label class="pmx-stem"><input type="checkbox" value="other"><span>Other</span></label>
+        </div>
+        <div class="pmx-options">
+          <label class="pmx-option"><input id="pmx-batch-skip-existing" type="checkbox" checked> Skip outputs already created</label>
+          <label class="pmx-option"><input id="pmx-batch-skip-derived" type="checkbox" checked> Skip practice mixes produced previously</label>
+        </div>
+      </div>
+    </section>
+
+    <section class="pmx-summary">
+      <div>
+        <strong id="pmx-batch-summary-title">Choose source and output folders</strong>
+        <p id="pmx-batch-summary-detail">Scan first to preview how many files need AI separation.</p>
+      </div>
+      <div class="pmx-actions">
+        <button id="pmx-batch-scan" class="pmx-button pmx-secondary" type="button" disabled>Scan folder</button>
+        <button id="pmx-batch-start" class="pmx-button pmx-primary" type="button" disabled>Start batch</button>
+      </div>
+    </section>
+
+    <div id="pmx-batch-status" class="pmx-status" role="status" aria-live="polite"></div>
+
+    <section id="pmx-batch-progress" class="pmx-batch-progress" hidden aria-live="polite">
+      <div class="pmx-progress-heading">
+        <div>
+          <strong id="pmx-batch-progress-title">Batch queued</strong>
+          <p id="pmx-batch-current" class="pmx-help"></p>
+        </div>
+        <button id="pmx-batch-cancel" class="pmx-button pmx-danger" type="button">Cancel safely</button>
+      </div>
+      <progress id="pmx-batch-progress-bar" max="1" value="0"></progress>
+      <div id="pmx-batch-counts" class="pmx-counts"></div>
+      <div id="pmx-batch-items" class="pmx-batch-items"></div>
+    </section>
+  </div>
+
+  <details class="pmx-details">
+    <summary>How the audio is made</summary>
+    <p>For a normal single-stem source, this optional plugin connects directly to the model server you started from Stem Splitter and downloads the selected audio into a temporary workspace. It does not require a modified Stem Splitter plugin. The exporter subtracts that temporary stem from the original full mix, encodes once to Ogg Vorbis, and deletes the whole temporary separation. It never adds those stems to your original package.</p>
+    <p>If the source already contains the selected stem, the exporter reuses it and skips the server. Charts, lyrics, artwork and metadata are copied into a new feedpak containing only the rendered full mix.</p>
+    <p>Batch mode runs one GPU separation at a time for stability and reuses byte-identical audio separated earlier in that batch. Engines that support a persistent model can keep it warm between songs. The temporary reuse cache is deleted when the queue finishes.</p>
+    <p>AI separation is not mathematically perfect: faint bleed can remain, and sounds incorrectly placed in an excluded stem can also be reduced.</p>
+  </details>
+</div>
