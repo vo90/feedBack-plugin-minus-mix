@@ -1,4 +1,4 @@
-# Practice Mix Exporter
+# MinusMix
 
 Creates a new, single-stem `.feedpak` for instrument practice from a normal
 single-stem or multi-stem local song. The source package is always read-only.
@@ -6,7 +6,7 @@ single-stem or multi-stem local song. The source package is always read-only.
 For selected stems `S`, the rendered backing is:
 
 ```text
-practice mix = original full mix - sum(S)
+MinusMix output = original full mix - sum(S)
 ```
 
 For a normal single-stem source, the plugin talks directly to the public HTTP
@@ -24,7 +24,7 @@ downloaded when the server uses recognisable standard stem labels.
 The subtraction happens on decoded audio in FFmpeg and the result is encoded
 once to Ogg Vorbis. Every arrangement, lyric track, rig, cover and other
 non-stem asset is copied into a new zip-form feedpak. The manifest is rewritten
-to one `full` stem and the preview is rebuilt from the practice mix.
+to one `full` stem and the preview is rebuilt from the MinusMix audio.
 
 ## Safety contract
 
@@ -38,12 +38,12 @@ to one `full` stem and the preview is rebuilt from the practice mix.
 
 ## Optional-plugin and server relationship
 
-Practice Mix Exporter is a standalone, optional, user-installed plugin. It is
+MinusMix is a standalone, optional, user-installed plugin. It is
 not a FeedBack core component and does not require a FeedBack or Stem Splitter
 code update. It discovers the local server state/config files used by current
 Stem Splitter releases and calls the server's existing `/health`, `/separate`,
 `/jobs` and download endpoints. The usual workflow is simply to start the local
-server from Stem Splitter and then open Practice Mix Exporter. Existing standard
+server from Stem Splitter and then open MinusMix. Existing standard
 `manifest.stems` entries remain a server-free fast path.
 
 The self-contained client also understands the app's existing
@@ -60,7 +60,7 @@ and rhythm guitar audio while leaving all lead/rhythm charts in the new pack.
 
 Batch mode scans `.feedpak` and `.sloppak` files recursively and recreates the
 source folder structure below a separately chosen output folder. It skips
-existing outputs and previously derived practice mixes by default, records
+existing outputs and songs previously derived by MinusMix by default, records
 per-file failures without stopping the queue, persists recent job status, and
 supports safe cancellation.
 
@@ -73,7 +73,7 @@ quality, or analysis-window reduction is used as a speed optimization.
 Single-song exports also run as background jobs. The screen reports validation,
 separation, rendering, preview and packaging stages, and safe cancellation can
 stop both the separator and FFmpeg rendering. Selecting an already-derived
-practice mix produces a quality warning so users can return to the original
+MinusMix output produces a quality warning so users can return to the original
 FeedPak instead of applying another lossy generation accidentally.
 
 ## Compatibility
@@ -94,5 +94,5 @@ normal Git update button.
 
 Stem Splitter remains a separate optional plugin. Install its current release,
 download its server/models once, and start that server before exporting from an
-unsplit song. Practice Mix Exporter does not replace, patch or update Stem
+unsplit song. MinusMix does not replace, patch or update Stem
 Splitter and does not download model weights itself.

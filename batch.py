@@ -1,4 +1,4 @@
-"""Recursive, resumable-status batch orchestration for practice-mix exports.
+"""Recursive, resumable-status batch orchestration for MinusMix exports.
 
 The queue is intentionally sequential.  Stem separation is normally GPU-bound,
 and concurrent BS-RoFormer jobs make a 4 GB card slower and less reliable.  A
@@ -169,7 +169,7 @@ def scan_sources(exporter, input_dir: str, output_dir: str, excluded_stems,
 
             if skip_derived and _looks_derived(info, source, exporter, selected):
                 item["scan_status"] = "skipped"
-                item["reason"] = "already a derived practice mix"
+                item["reason"] = "already a derived MinusMix song"
                 counts["skipped_derived"] += 1
             elif skip_existing and desired.exists():
                 item["scan_status"] = "skipped"
@@ -225,7 +225,8 @@ class BatchManager:
         self.exporter = exporter
         self.separator = separator
         self.log = log
-        self.state_file = Path(config_dir) / "practice_mix_batch_jobs.json"
+        self.state_file = Path(config_dir) / "minus_mix_batch_jobs.json"
+        self.legacy_state_file = Path(config_dir) / "practice_mix_batch_jobs.json"
         self.lock = threading.RLock()
         self.jobs: dict[str, dict] = {}
         self.cancel_events: dict[str, threading.Event] = {}
@@ -236,7 +237,8 @@ class BatchManager:
 
     def _load(self) -> None:
         try:
-            data = json.loads(self.state_file.read_text(encoding="utf-8"))
+            source = self.state_file if self.state_file.is_file() else self.legacy_state_file
+            data = json.loads(source.read_text(encoding="utf-8"))
         except Exception:
             return
         jobs = data.get("jobs") if isinstance(data, dict) else None
@@ -271,7 +273,7 @@ class BatchManager:
         except OSError as exc:
             # Status persistence is useful for navigation/restart recovery, but
             # losing it must never fail an otherwise valid audio export.
-            self.log.warning("practice_mix_exporter: could not persist batch status: %s", exc)
+            self.log.warning("minus_mix: could not persist batch status: %s", exc)
 
     def _snapshot_locked(self, job: dict) -> dict:
         return copy.deepcopy(job)
@@ -304,7 +306,7 @@ class BatchManager:
                 self.active_id
                 and self.jobs.get(self.active_id, {}).get("status") in ACTIVE_STATUSES
             ):
-                raise BatchError("another practice-mix batch is already running")
+                raise BatchError("another MinusMix batch is already running")
             # Reserve the start before the potentially long authoritative scan.
             # Without this flag two simultaneous POSTs could both pass the
             # active-id check and create independent GPU queues.
@@ -381,7 +383,7 @@ class BatchManager:
             self.starting = False
             self._persist_locked(force=True)
         thread = threading.Thread(
-            target=self._run, args=(job_id,), name=f"practice-mix-batch-{job_id[:8]}", daemon=True,
+            target=self._run, args=(job_id,), name=f"minus-mix-batch-{job_id[:8]}", daemon=True,
         )
         try:
             thread.start()
@@ -553,7 +555,7 @@ class BatchManager:
                                     cached.setdefault(stem, cache_path)
                             return produced
 
-                        result = self.exporter.export_practice_mix(
+                        result = self.exporter.export_minus_mix(
                             source, output_dir, selected,
                             separate_missing=separate_missing,
                             progress_cb=progress, cancel_cb=checkpoint, log=self.log,
@@ -588,7 +590,7 @@ class BatchManager:
                                               detail="Canceled", force=True)
                             break
                         message = str(exc)[:500] or type(exc).__name__
-                        self.log.exception("practice_mix_exporter: batch item failed: %s", relative_value)
+                        self.log.exception("minus_mix: batch item failed: %s", relative_value)
                         with self.lock:
                             current = self.jobs[job_id]["items"][index]
                             current.update({
@@ -623,7 +625,7 @@ class BatchManager:
                     current_job["completed_at"] = _now()
                     self._persist_locked(force=True)
         except Exception as exc:
-            self.log.exception("practice_mix_exporter: batch worker failed")
+            self.log.exception("minus_mix: batch worker failed")
             with self.lock:
                 current_job = self.jobs[job_id]
                 current_job["status"] = "failed"

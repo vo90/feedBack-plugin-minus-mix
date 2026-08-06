@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import tempfile
 import threading
 import time
@@ -24,8 +25,8 @@ def _pak(path: Path, *, full: bytes = b"same full audio", guitar: bool = False,
         stems.append({"id": "guitar", "file": "stems/guitar.ogg"})
     manifest = {"title": path.stem, "artist": "Test", "stems": stems}
     if derived:
-        manifest["practice_mix_export"] = {
-            "excluded_stems": ["guitar"], "generator": "practice_mix_exporter",
+        manifest["minus_mix"] = {
+            "excluded_stems": ["guitar"], "generator": "minus_mix",
         }
     with zipfile.ZipFile(path, "w") as zf:
         zf.writestr("manifest.yaml", yaml.safe_dump(manifest, sort_keys=False))
@@ -45,8 +46,8 @@ class FakeExporter:
     stem_label = staticmethod(exporter.stem_label)
 
     @staticmethod
-    def export_practice_mix(source, output_dir, selected, *, separate_missing,
-                            progress_cb, cancel_cb, log):
+    def export_minus_mix(source, output_dir, selected, *, separate_missing,
+                         progress_cb, cancel_cb, log):
         cancel_cb()
         info = exporter.inspect_source(source)
         saved = {stem.id for stem in info.stems}
@@ -166,7 +167,7 @@ def test_batch_reuses_identical_temporary_separation_and_persists_status(tmp_pat
     assert (output_root / "B" / "two (No Guitar).feedpak").is_file()
     assert {_hash(first), _hash(second)} == original_hashes
     assert service.returned_dirs and all(not path.exists() for path in service.returned_dirs)
-    assert (tmp_path / "config" / "practice_mix_batch_jobs.json").is_file()
+    assert (tmp_path / "config" / "minus_mix_batch_jobs.json").is_file()
 
 
 def test_batch_cancel_stops_at_model_checkpoint_and_cancels_waiting_files(tmp_path):
@@ -245,3 +246,28 @@ def test_batch_reserves_start_while_authoritative_scan_is_running(tmp_path):
     assert not worker.is_alive()
     assert started
     _wait(manager, started[0]["id"])
+
+
+def test_batch_reads_legacy_pre_rename_status_and_persists_under_new_name(tmp_path):
+    config = tmp_path / "config"
+    config.mkdir()
+    legacy = config / "practice_mix_batch_jobs.json"
+    legacy.write_text(json.dumps({
+        "version": 1,
+        "jobs": [{
+            "id": "legacy-job",
+            "status": "completed",
+            "created_at": "2026-08-01T00:00:00+00:00",
+            "items": [],
+        }],
+    }), encoding="utf-8")
+
+    manager = batch.BatchManager(FakeExporter(), FakeService(), config, SimpleNamespace(
+        exception=lambda *args, **kwargs: None,
+        warning=lambda *args, **kwargs: None,
+    ))
+
+    assert manager.latest()["id"] == "legacy-job"
+    with manager.lock:
+        manager._persist_locked(force=True)
+    assert (config / "minus_mix_batch_jobs.json").is_file()

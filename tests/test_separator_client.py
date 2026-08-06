@@ -1,4 +1,4 @@
-"""Standalone Practice Mix Exporter server-client compatibility tests."""
+"""Standalone MinusMix server-client compatibility tests."""
 from __future__ import annotations
 
 import json

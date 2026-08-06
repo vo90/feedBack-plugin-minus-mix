@@ -1,4 +1,4 @@
-"""Practice Mix Exporter: real-audio and package-safety integration tests."""
+"""MinusMix: real-audio and package-safety integration tests."""
 from __future__ import annotations
 
 import array
@@ -108,7 +108,7 @@ def test_export_removes_selected_audio_preserves_assets_and_never_mutates_source
     out_dir = tmp_path / "exports"
     out_dir.mkdir()
 
-    result = exporter.export_practice_mix(source, out_dir, ["guitar"])
+    result = exporter.export_minus_mix(source, out_dir, ["guitar"])
 
     assert _sha256(source) == source_hash
     assert result.output_path.parent == out_dir
@@ -130,8 +130,10 @@ def test_export_removes_selected_audio_preserves_assets_and_never_mutates_source
             "id": "full", "file": "stems/full.ogg", "codec": "vorbis", "default": True,
         }]
         assert "original_audio" not in manifest
-        assert manifest["practice_mix_export"]["excluded_stems"] == ["guitar"]
-        assert manifest["practice_mix_export"]["source_title"] == "Test Song"
+        assert manifest["minus_mix"]["excluded_stems"] == ["guitar"]
+        assert manifest["minus_mix"]["source_title"] == "Test Song"
+        assert manifest["minus_mix"]["generator"] == "minus_mix"
+        assert "practice_mix_export" not in manifest
         assert manifest["stem_separation"]["model"] == "bs_roformer_sw"
         rendered = tmp_path / "rendered.ogg"
         rendered.write_bytes(zf.read("stems/full.ogg"))
@@ -142,7 +144,7 @@ def test_export_removes_selected_audio_preserves_assets_and_never_mutates_source
     assert high < low / 8.0
 
     # A second export chooses a new name; it never asks whether overwriting is OK.
-    second = exporter.export_practice_mix(source, out_dir, ["guitar"])
+    second = exporter.export_minus_mix(source, out_dir, ["guitar"])
     assert second.output_filename == "Test Artist - Test Song (No Guitar) (2).feedpak"
     assert result.output_path.is_file() and second.output_path.is_file()
     assert _sha256(source) == source_hash
@@ -167,7 +169,7 @@ def test_single_stem_source_uses_temporary_separator_and_discards_its_outputs(tm
         _ogg_sine(other, 220)
         return {"guitar": guitar, "drums": other}
 
-    result = exporter.export_practice_mix(
+    result = exporter.export_minus_mix(
         source, out_dir, ["guitar"], separate_missing=separate,
     )
 
@@ -194,7 +196,7 @@ def test_export_refuses_unsafe_source_archive_and_leaves_no_partial_output(tmp_p
     out_dir.mkdir()
 
     with pytest.raises(exporter.ExportError, match="unsafe member path"):
-        exporter.export_practice_mix(source, out_dir, ["guitar"])
+        exporter.export_minus_mix(source, out_dir, ["guitar"])
 
     assert _sha256(source) == source_hash
     assert list(out_dir.iterdir()) == []
@@ -204,6 +206,10 @@ def test_source_inspection_and_selection_validation(tmp_path, monkeypatch):
     source = tmp_path / "song.feedpak"
     manifest = {
         "title": "Song",
+        "practice_mix_export": {
+            "excluded_stems": ["guitar"],
+            "generator": "practice_mix_exporter",
+        },
         "stems": [
             {"id": "full", "file": "stems/full.ogg"},
             {"id": "guitar", "file": "stems/guitar.ogg"},
@@ -217,14 +223,15 @@ def test_source_inspection_and_selection_validation(tmp_path, monkeypatch):
     info = exporter.inspect_source(source)
     assert info.full_mix_file == "stems/full.ogg"
     assert [stem.id for stem in info.stems] == ["full", "guitar"]
+    assert info.derived_exclusions == ("guitar",)
 
     monkeypatch.setattr(exporter, "_ffmpeg_cmd", lambda: "ffmpeg")
     out_dir = tmp_path / "out"
     out_dir.mkdir()
     with pytest.raises(exporter.ExportError, match="at least one"):
-        exporter.export_practice_mix(source, out_dir, ["full"])
+        exporter.export_minus_mix(source, out_dir, ["full"])
     with pytest.raises(exporter.ExportError, match="start Stem Splitter"):
-        exporter.export_practice_mix(source, out_dir, ["vocals"])
+        exporter.export_minus_mix(source, out_dir, ["vocals"])
 
 
 def test_ogg_process_is_terminated_at_cancellation_checkpoint(tmp_path):

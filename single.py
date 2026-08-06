@@ -1,4 +1,4 @@
-"""Background job orchestration for one practice-mix export.
+"""Background job orchestration for one MinusMix export.
 
 The audio/package implementation stays in :mod:`exporter`.  This layer only
 turns that blocking operation into a small observable job so the browser can
@@ -96,7 +96,7 @@ class SingleExportManager:
         event = threading.Event()
         with self.lock:
             if self.is_active():
-                raise SingleExportError("another single-song practice mix is already running")
+                raise SingleExportError("another single-song MinusMix export is already running")
             self.jobs[job_id] = job
             self.cancel_events[job_id] = event
             self.active_id = job_id
@@ -109,7 +109,7 @@ class SingleExportManager:
         thread = threading.Thread(
             target=self._run,
             args=(job_id, source, output_dir, tuple(selected)),
-            name=f"practice-mix-single-{job_id[:8]}",
+            name=f"minus-mix-single-{job_id[:8]}",
             daemon=True,
         )
         try:
@@ -190,12 +190,12 @@ class SingleExportManager:
             )
 
         try:
-            result = self.exporter.export_practice_mix(
+            result = self.exporter.export_minus_mix(
                 source, output_dir, selected,
                 separate_missing=separate_missing,
                 progress_cb=progress, cancel_cb=checkpoint, log=self.log,
             )
-            # Once export_practice_mix returns, its atomic rename has completed.
+            # Once export_minus_mix returns, its atomic rename has completed.
             # A late cancel must not claim that the already-created file vanished.
             payload = {
                 "filename": result.output_filename,
@@ -223,7 +223,7 @@ class SingleExportManager:
                     "completed_at": _now(),
                 })
             if not canceled:
-                self.log.exception("practice_mix_exporter: single export failed")
+                self.log.exception("minus_mix: single export failed")
         finally:
             with self.lock:
                 if self.active_id == job_id:

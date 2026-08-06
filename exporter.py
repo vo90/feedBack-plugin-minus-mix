@@ -131,7 +131,12 @@ def inspect_source(source: Path) -> SourceInfo:
         raise ExportError("the source feedpak has no full mix to subtract from")
     instruments = tuple(s for sid, s in stems.items() if sid != "full")
     arrangements = tuple(a for a in (manifest.get("arrangements") or []) if isinstance(a, dict))
-    derived = manifest.get("practice_mix_export")
+    # ``practice_mix_export`` was written by the unpublished pre-rename build.
+    # Continue recognising it so the user's existing test exports are not
+    # mistaken for originals after the public identity changed to MinusMix.
+    derived = manifest.get("minus_mix")
+    if not isinstance(derived, dict):
+        derived = manifest.get("practice_mix_export")
     derived_exclusions: tuple[str, ...] = ()
     if isinstance(derived, dict) and isinstance(derived.get("excluded_stems"), list):
         derived_exclusions = tuple(
@@ -247,7 +252,7 @@ def _run_ogg_command(command: list[str], output: Path, *, timeout: int = 1800,
         if b"Unknown encoder 'libvorbis'" not in last_stderr:
             break
     detail = _ffmpeg_detail(last_stderr, output)
-    raise ExportError(f"ffmpeg could not render the practice mix: {detail}")
+    raise ExportError(f"ffmpeg could not render the MinusMix audio: {detail}")
 
 
 def _render_mix(ffmpeg: str, full_mix: Path, excluded: list[Path], output: Path,
@@ -322,7 +327,7 @@ def _safe_filename_base(value: str) -> str:
     value = _INVALID_FILENAME.sub("_", value)
     value = " ".join(value.split()).strip(" .")
     # Leave room for " (No …) (999).feedpak" on filesystems with a 255-byte-ish limit.
-    return value[:150] or "Practice Mix"
+    return value[:150] or "MinusMix"
 
 
 def _unique_output(output_dir: Path, source: Path, suffix: str) -> Path:
@@ -441,11 +446,11 @@ def _report(progress_cb: ProgressCallback | None, stage: str,
         progress_cb(stage, max(0.0, min(1.0, float(progress))), detail)
 
 
-def export_practice_mix(source: Path, output_dir: Path, excluded_stems: Iterable[str], *,
-                        separate_missing: TemporarySeparator | None = None,
-                        progress_cb: ProgressCallback | None = None,
-                        cancel_cb: CancelCallback | None = None,
-                        log=None) -> ExportResult:
+def export_minus_mix(source: Path, output_dir: Path, excluded_stems: Iterable[str], *,
+                     separate_missing: TemporarySeparator | None = None,
+                     progress_cb: ProgressCallback | None = None,
+                     cancel_cb: CancelCallback | None = None,
+                     log=None) -> ExportResult:
     _checkpoint(cancel_cb)
     _report(progress_cb, "validating", 0.01, "Checking source feedpak")
     source = Path(source).resolve()
@@ -483,7 +488,7 @@ def export_practice_mix(source: Path, output_dir: Path, excluded_stems: Iterable
         )
 
     suffix = _suffix(selected)
-    with tempfile.TemporaryDirectory(prefix="feedback_practice_mix_") as td:
+    with tempfile.TemporaryDirectory(prefix="feedback_minus_mix_") as td:
         work = Path(td)
         _checkpoint(cancel_cb)
         _report(progress_cb, "extracting", 0.04, "Reading the full mix")
@@ -522,7 +527,7 @@ def export_practice_mix(source: Path, output_dir: Path, excluded_stems: Iterable
                 )
 
         _checkpoint(cancel_cb)
-        _report(progress_cb, "rendering", 0.78, "Rendering the practice mix")
+        _report(progress_cb, "rendering", 0.78, "Rendering the MinusMix backing track")
 
         excluded_local: list[Path] = []
         for index, stem_id in enumerate(selected, 1):
@@ -534,18 +539,18 @@ def export_practice_mix(source: Path, output_dir: Path, excluded_stems: Iterable
             else:
                 excluded_local.append(temporary[stem_id])
 
-        practice_ogg = work / "practice-full.ogg"
-        _render_mix(ffmpeg, full_local, excluded_local, practice_ogg, cancel_cb=cancel_cb)
+        minus_mix_ogg = work / "minus-mix-full.ogg"
+        _render_mix(ffmpeg, full_local, excluded_local, minus_mix_ogg, cancel_cb=cancel_cb)
 
         _checkpoint(cancel_cb)
         _report(progress_cb, "preview", 0.88, "Creating the preview")
         preview_ogg = work / "preview.ogg"
         preview_created = _render_preview(
-            ffmpeg, practice_ogg, preview_ogg, manifest.get("duration"),
+            ffmpeg, minus_mix_ogg, preview_ogg, manifest.get("duration"),
             cancel_cb=cancel_cb,
         )
         if not preview_created and log:
-            log.warning("practice_mix_exporter: preview render failed; exporting without a preview")
+            log.warning("minus_mix: preview render failed; exporting without a preview")
 
         new_manifest = dict(manifest)
         source_title = str(manifest.get("title") or source.stem)
@@ -553,10 +558,11 @@ def export_practice_mix(source: Path, output_dir: Path, excluded_stems: Iterable
         new_manifest["stems"] = [{
             "id": "full", "file": FULL_MIX_REL, "codec": "vorbis", "default": True,
         }]
-        new_manifest["practice_mix_export"] = {
+        new_manifest.pop("practice_mix_export", None)
+        new_manifest["minus_mix"] = {
             "excluded_stems": list(selected),
             "source_title": source_title,
-            "generator": "practice_mix_exporter",
+            "generator": "minus_mix",
         }
         # Deprecated and now wrong: the pre-separation original is intentionally
         # absent from this derived, single-stem package.
@@ -572,7 +578,7 @@ def export_practice_mix(source: Path, output_dir: Path, excluded_stems: Iterable
         remove = set(old_stem_files)
         if isinstance(old_preview, str) and old_preview.strip():
             remove.add(_member_name(old_preview.strip()))
-        replacements = {FULL_MIX_REL: practice_ogg}
+        replacements = {FULL_MIX_REL: minus_mix_ogg}
         if preview_created:
             replacements[PREVIEW_REL] = preview_ogg
 

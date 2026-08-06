@@ -1,9 +1,9 @@
-<!-- Injected by the host into div#plugin-practice_mix_exporter.screen. -->
+<!-- Injected by the host into div#plugin-minus_mix.screen. -->
 <div class="practice-mix-exporter">
   <header class="pmx-header">
     <div>
-      <h1>Practice Mix Exporter</h1>
-      <p>Create a new single-stem feedpak with selected instrument audio removed. Your source feedpak is never changed.</p>
+      <h1>MinusMix</h1>
+      <p>Create a playable song without the instrument parts you choose. Your source FeedPak is never changed.</p>
     </div>
     <span class="pmx-native-badge">Optional plugin</span>
   </header>
@@ -66,7 +66,7 @@
       <strong id="pmx-summary-title">Ready when you are</strong>
       <p id="pmx-summary-detail">Select a song, at least one stem, and an output folder.</p>
     </div>
-    <button id="pmx-export" class="pmx-button pmx-primary" type="button" disabled>Create practice feedpak</button>
+    <button id="pmx-export" class="pmx-button pmx-primary" type="button" disabled>Create MinusMix FeedPak</button>
   </section>
 
   <div id="pmx-status" class="pmx-status" role="status" aria-live="polite"></div>
@@ -86,7 +86,7 @@
   <div id="pmx-batch-panel" role="tabpanel" hidden>
     <section class="pmx-batch-intro">
       <h2>Batch folder conversion</h2>
-      <p>Recursively scan a folder and create compact practice feedpaks in a separate output tree. Processing is sequential for GPU stability; one bad file does not stop the queue.</p>
+      <p>Recursively scan a folder and create compact MinusMix FeedPaks in a separate output tree. Processing is sequential for GPU stability; one bad file does not stop the queue.</p>
     </section>
 
     <section class="pmx-card">
@@ -127,7 +127,7 @@
         </div>
         <div class="pmx-options">
           <label class="pmx-option"><input id="pmx-batch-skip-existing" type="checkbox" checked> Skip outputs already created</label>
-          <label class="pmx-option"><input id="pmx-batch-skip-derived" type="checkbox" checked> Skip practice mixes produced previously</label>
+          <label class="pmx-option"><input id="pmx-batch-skip-derived" type="checkbox" checked> Skip songs already produced by MinusMix</label>
         </div>
       </div>
     </section>
@@ -161,8 +161,8 @@
 
   <details class="pmx-details">
     <summary>How the audio is made</summary>
-    <p>For a normal single-stem source, this optional plugin connects directly to the model server you started from Stem Splitter and downloads the selected audio into a temporary workspace. It does not require a modified Stem Splitter plugin. The exporter subtracts that temporary stem from the original full mix, encodes once to Ogg Vorbis, and deletes the whole temporary separation. It never adds those stems to your original package.</p>
-    <p>If the source already contains the selected stem, the exporter reuses it and skips the server. Charts, lyrics, artwork and metadata are copied into a new feedpak containing only the rendered full mix.</p>
+    <p>For a normal single-stem source, this optional plugin connects directly to the model server you started from Stem Splitter and downloads the selected audio into a temporary workspace. It does not require a modified Stem Splitter plugin. MinusMix subtracts that temporary stem from the original full mix, encodes once to Ogg Vorbis, and deletes the whole temporary separation. It never adds those stems to your original package.</p>
+    <p>If the source already contains the selected stem, MinusMix reuses it and skips the server. Charts, lyrics, artwork and metadata are copied into a new FeedPak containing only the rendered full mix.</p>
     <p>Batch mode runs one GPU separation at a time for stability and reuses byte-identical audio separated earlier in that batch. Engines that support a persistent model can keep it warm between songs. The temporary reuse cache is deleted when the queue finishes.</p>
     <p>AI separation is not mathematically perfect: faint bleed can remain, and sounds incorrectly placed in an excluded stem can also be reduced.</p>
   </details>

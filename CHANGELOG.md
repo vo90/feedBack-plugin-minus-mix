@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.0
+
+- Renamed the plugin from Practice Mix Exporter to MinusMix.
+- Changed the public plugin id and API namespace to `minus_mix` before the
+  first public release.
+- Preserved recognition of FeedPaks and saved UI folders created by the local
+  pre-rename build.
+
 ## 0.4.0
 
 - Made Practice Mix Exporter a completely standalone optional plugin.
@@ -10,4 +18,3 @@
 - Added single-song and recursive batch exporting with non-destructive output,
   duplicate-audio reuse and persistent batch status.
 - Added a standalone test suite with real FFmpeg export coverage.
-

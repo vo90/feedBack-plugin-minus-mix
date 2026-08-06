@@ -1,6 +1,6 @@
 """Self-contained client for the Stem Splitter model server.
 
-The Practice Mix Exporter is installed independently, so it cannot rely on an
+MinusMix is installed independently, so it cannot rely on an
 unreleased Python service inside another plugin.  It discovers the server that
 the released Stem Splitter already manages, speaks that server's public HTTP
 API, and writes requested stems only into caller-owned temporary storage.
@@ -287,7 +287,7 @@ class SeparationClient:
             hop_headers = headers if _same_origin(url, target.url) else None
             if headers and hop_headers is None:
                 self.log.warning(
-                    "practice_mix_exporter: downloading %s without the server API key "
+                    "minus_mix: downloading %s without the server API key "
                     "because it is off-origin from the configured server",
                     _redact_url(url),
                 )
@@ -326,13 +326,13 @@ class SeparationClient:
                     return
                 if response.status_code not in (404, 405):
                     self.log.warning(
-                        "practice_mix_exporter: temporary server-cache cleanup returned HTTP %s",
+                        "minus_mix: temporary server-cache cleanup returned HTTP %s",
                         response.status_code,
                     )
                     return
             except Exception as exc:
                 self.log.warning(
-                    "practice_mix_exporter: temporary server-cache cleanup failed: %s", exc,
+                    "minus_mix: temporary server-cache cleanup failed: %s", exc,
                 )
                 return
             finally:

@@ -1,15 +1,19 @@
-/* Practice Mix Exporter — screen UI + library card action. */
+/* MinusMix — screen UI + library card action. */
 (function () {
   'use strict';
-  if (window.__practiceMixExporterLoaded) return;
-  window.__practiceMixExporterLoaded = true;
+  if (window.__minusMixLoaded) return;
+  window.__minusMixLoaded = true;
 
-  var API = '/api/plugins/practice_mix_exporter';
-  var SCREEN_ID = 'plugin-practice_mix_exporter';
-  var STORAGE_OUTPUT = 'practice_mix_exporter.output_dir';
-  var STORAGE_BATCH_INPUT = 'practice_mix_exporter.batch_input_dir';
-  var STORAGE_BATCH_OUTPUT = 'practice_mix_exporter.batch_output_dir';
-  var STORAGE_MODE = 'practice_mix_exporter.mode';
+  var API = '/api/plugins/minus_mix';
+  var SCREEN_ID = 'plugin-minus_mix';
+  var STORAGE_OUTPUT = 'minus_mix.output_dir';
+  var STORAGE_BATCH_INPUT = 'minus_mix.batch_input_dir';
+  var STORAGE_BATCH_OUTPUT = 'minus_mix.batch_output_dir';
+  var STORAGE_MODE = 'minus_mix.mode';
+  var LEGACY_STORAGE_OUTPUT = 'practice_mix_exporter.output_dir';
+  var LEGACY_STORAGE_BATCH_INPUT = 'practice_mix_exporter.batch_input_dir';
+  var LEGACY_STORAGE_BATCH_OUTPUT = 'practice_mix_exporter.batch_output_dir';
+  var LEGACY_STORAGE_MODE = 'practice_mix_exporter.mode';
   var fb = window.feedBack;
   var state = {
     inited: false, busy: false, selectedFilename: '', selectedLabel: '',
@@ -45,7 +49,7 @@
         return;
       }
     } catch (_) {}
-    console.log('[practice_mix_exporter]', title, message || '');
+    console.log('[minus_mix]', title, message || '');
   }
   function showStatus(kind, text) {
     var node = $('pmx-status');
@@ -77,6 +81,10 @@
   function outputFolder() { return (($('pmx-output') && $('pmx-output').value) || '').trim(); }
   function batchInputFolder() { return (($('pmx-batch-input') && $('pmx-batch-input').value) || '').trim(); }
   function batchOutputFolder() { return (($('pmx-batch-output') && $('pmx-batch-output').value) || '').trim(); }
+  function storedValue(key, legacyKey, fallback) {
+    try { return localStorage.getItem(key) || localStorage.getItem(legacyKey) || fallback; }
+    catch (_) { return fallback; }
+  }
 
   function selectionNeedsSeparation(stems) {
     if (!state.sourceInfo || !Array.isArray(state.sourceInfo.stems)) return false;
@@ -102,7 +110,7 @@
     var exclusions = info && Array.isArray(info.derived_exclusions) ? info.derived_exclusions : [];
     node.hidden = !exclusions.length;
     node.textContent = exclusions.length
-      ? 'This is already a practice mix with ' + exclusions.map(labelFor).join(' + ')
+      ? 'This song was already created by MinusMix with ' + exclusions.map(labelFor).join(' + ')
         + ' removed. For the best audio quality, select the original FeedPak instead of separating this copy again.'
       : '';
   }
@@ -124,7 +132,7 @@
     var title = $('pmx-summary-title'), detail = $('pmx-summary-detail');
     if (!title || !detail) return;
     if (state.busy) {
-      title.textContent = 'Creating practice feedpak…';
+      title.textContent = 'Creating MinusMix FeedPak…';
       detail.textContent = (needsSeparation ? 'Temporarily separating, then rendering' : 'Rendering')
         + ' the full mix minus ' + stems.map(labelFor).join(' + ') + '. The source remains untouched.';
     } else if (ready) {
@@ -236,9 +244,9 @@
   function registerCardAction() {
     if (!fb || !fb.libraryCardActions) return;
     fb.libraryCardActions.register({
-      id: 'practice_mix_exporter.create',
-      pluginId: 'practice_mix_exporter',
-      label: 'Create practice mix…',
+      id: 'minus_mix.create',
+      pluginId: 'minus_mix',
+      label: 'Create MinusMix song…',
       placement: 'menu',
       order: 31,
       applies: function (song) {
@@ -272,7 +280,7 @@
     if (progress) progress.hidden = false;
     if ($('pmx-single-progress-title')) {
       $('pmx-single-progress-title').textContent = job.status === 'completed'
-        ? 'Practice FeedPak created' : job.status === 'canceled' ? 'Export canceled'
+        ? 'MinusMix FeedPak created' : job.status === 'canceled' ? 'Export canceled'
           : job.status === 'failed' ? 'Export failed' : stageLabel(job.stage);
     }
     if ($('pmx-single-current')) {
@@ -296,15 +304,15 @@
         + '. The original feedpak was not changed.' + temporary);
       if (job.id && state.singleNotifiedId !== job.id) {
         state.singleNotifiedId = job.id;
-        notify('Practice feedpak created', result.filename, 'ok');
+        notify('MinusMix FeedPak created', result.filename, 'ok');
       }
     } else if (job.status === 'canceled') {
       showStatus('info', 'Export canceled safely. The source FeedPak was not changed.');
     } else if (job.status === 'failed') {
-      showStatus('error', job.detail || 'Practice mix export failed.');
+      showStatus('error', job.detail || 'MinusMix export failed.');
       if (job.id && state.singleNotifiedId !== job.id) {
         state.singleNotifiedId = job.id;
-        notify('Practice mix export failed', job.detail || 'Export failed', 'warn');
+        notify('MinusMix export failed', job.detail || 'Export failed', 'warn');
       }
     }
     updateReady();
@@ -552,7 +560,7 @@
       state.batchNotifiedId = job.id;
       if (job.status === 'completed') {
         showBatchStatus((counts.failed || 0) ? 'error' : 'ok', job.detail || 'Batch completed.');
-        notify('Practice-mix batch completed', (counts.done || 0) + ' feedpaks created', (counts.failed || 0) ? 'warn' : 'ok');
+        notify('MinusMix batch completed', (counts.done || 0) + ' FeedPaks created', (counts.failed || 0) ? 'warn' : 'ok');
       } else if (job.status === 'canceled') {
         showBatchStatus('info', 'Batch canceled safely. Completed output files were kept.');
       } else {
@@ -633,7 +641,7 @@
       renderSingleJob(job);
     }).catch(function (error) {
       showStatus('error', error.message);
-      notify('Practice mix export failed', error.message, 'warn');
+      notify('MinusMix export failed', error.message, 'warn');
       state.busy = false;
       updateReady();
       updateBatchReady();
@@ -675,10 +683,10 @@
     state.inited = true;
     var saved = '';
     var batchInput = '', batchOutput = '', savedMode = 'single';
-    try { saved = localStorage.getItem(STORAGE_OUTPUT) || ''; } catch (_) {}
-    try { batchInput = localStorage.getItem(STORAGE_BATCH_INPUT) || ''; } catch (_) {}
-    try { batchOutput = localStorage.getItem(STORAGE_BATCH_OUTPUT) || ''; } catch (_) {}
-    try { savedMode = localStorage.getItem(STORAGE_MODE) || 'single'; } catch (_) {}
+    saved = storedValue(STORAGE_OUTPUT, LEGACY_STORAGE_OUTPUT, '');
+    batchInput = storedValue(STORAGE_BATCH_INPUT, LEGACY_STORAGE_BATCH_INPUT, '');
+    batchOutput = storedValue(STORAGE_BATCH_OUTPUT, LEGACY_STORAGE_BATCH_OUTPUT, '');
+    savedMode = storedValue(STORAGE_MODE, LEGACY_STORAGE_MODE, 'single');
     if ($('pmx-output')) $('pmx-output').value = saved;
     if ($('pmx-batch-input')) $('pmx-batch-input').value = batchInput;
     if ($('pmx-batch-output')) $('pmx-batch-output').value = batchOutput;

@@ -25,8 +25,8 @@ class CompletingExporter:
         return SimpleNamespace(title="Test Song")
 
     @staticmethod
-    def export_practice_mix(source, output_dir, selected, *, separate_missing,
-                            progress_cb, cancel_cb, log):
+    def export_minus_mix(source, output_dir, selected, *, separate_missing,
+                         progress_cb, cancel_cb, log):
         cancel_cb()
         progress_cb("rendering", 0.78, "Creating backing track")
         target = Path(output_dir) / "Test Song (No Guitar).feedpak"
@@ -72,8 +72,8 @@ def test_single_export_cancel_reaches_worker_checkpoint(tmp_path):
 
     class BlockingExporter(CompletingExporter):
         @staticmethod
-        def export_practice_mix(source, output_dir, selected, *, separate_missing,
-                                progress_cb, cancel_cb, log):
+        def export_minus_mix(source, output_dir, selected, *, separate_missing,
+                             progress_cb, cancel_cb, log):
             progress_cb("rendering", 0.78, "Creating backing track")
             entered.set()
             while True:

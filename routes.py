@@ -1,4 +1,4 @@
-"""Backend API for the Practice Mix Exporter plugin."""
+"""Backend API for the MinusMix plugin."""
 from __future__ import annotations
 
 import ipaddress
@@ -8,7 +8,7 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Request
 
 
-PLUGIN_ID = "practice_mix_exporter"
+PLUGIN_ID = "minus_mix"
 API = f"/api/plugins/{PLUGIN_ID}"
 MAX_SOURCE_RESULTS = 250
 DEFAULT_TARGETS = ("guitar", "bass", "drums", "vocals", "piano", "other")
@@ -131,7 +131,7 @@ def setup(app: FastAPI, context: dict) -> None:
                     break
                 page += 1
         except Exception:
-            log.exception("practice_mix_exporter: could not query feedpak sources")
+            log.exception("minus_mix: could not query feedpak sources")
             raise HTTPException(500, "could not read the local song index")
         return {"songs": found, "truncated": len(found) >= MAX_SOURCE_RESULTS}
 
@@ -168,7 +168,7 @@ def setup(app: FastAPI, context: dict) -> None:
         # dialog. Never expose that write primitive to clients connected through
         # optional LAN mode.
         if not _is_loopback(request):
-            raise HTTPException(403, "practice-mix export is only available on this computer")
+            raise HTTPException(403, "MinusMix export is only available on this computer")
         if not isinstance(body, dict):
             raise HTTPException(400, "invalid export request")
         output_raw = body.get("output_dir")
@@ -186,7 +186,7 @@ def setup(app: FastAPI, context: dict) -> None:
             with operation_start_lock:
                 if batch_manager.is_active():
                     raise single_module.SingleExportError(
-                        "wait for the active practice-mix batch to finish or cancel it first"
+                        "wait for the active MinusMix batch to finish or cancel it first"
                     )
                 return single_manager.start(source_path, output_dir, excluded)
         except (exporter.ExportError, single_module.SingleExportError) as exc:
@@ -194,7 +194,7 @@ def setup(app: FastAPI, context: dict) -> None:
         except PermissionError as exc:
             raise HTTPException(403, "the app cannot write to the chosen output folder") from exc
         except Exception as exc:
-            log.exception("practice_mix_exporter: could not start single export")
+            log.exception("minus_mix: could not start single export")
             raise HTTPException(500, "the practice feedpak job could not be started") from exc
 
     @app.get(f"{API}/export/latest")
@@ -232,7 +232,7 @@ def setup(app: FastAPI, context: dict) -> None:
         except PermissionError as exc:
             raise HTTPException(403, "the app cannot read one of the selected folders") from exc
         except OSError as exc:
-            log.exception("practice_mix_exporter: batch scan failed")
+            log.exception("minus_mix: batch scan failed")
             raise HTTPException(500, "the selected folders could not be scanned") from exc
 
     @app.post(f"{API}/batch/start")
@@ -276,4 +276,4 @@ def setup(app: FastAPI, context: dict) -> None:
         except batch_module.BatchError as exc:
             raise HTTPException(404, str(exc)) from exc
 
-    log.info("practice_mix_exporter: routes registered")
+    log.info("minus_mix: routes registered")
