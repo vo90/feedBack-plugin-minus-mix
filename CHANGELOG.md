@@ -5,8 +5,6 @@
 - Renamed the plugin from Practice Mix Exporter to MinusMix.
 - Changed the public plugin id and API namespace to `minus_mix` before the
   first public release.
-- Preserved recognition of FeedPaks and saved UI folders created by the local
-  pre-rename build.
 
 ## 0.4.0
 

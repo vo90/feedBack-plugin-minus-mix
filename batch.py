@@ -226,7 +226,6 @@ class BatchManager:
         self.separator = separator
         self.log = log
         self.state_file = Path(config_dir) / "minus_mix_batch_jobs.json"
-        self.legacy_state_file = Path(config_dir) / "practice_mix_batch_jobs.json"
         self.lock = threading.RLock()
         self.jobs: dict[str, dict] = {}
         self.cancel_events: dict[str, threading.Event] = {}
@@ -237,8 +236,7 @@ class BatchManager:
 
     def _load(self) -> None:
         try:
-            source = self.state_file if self.state_file.is_file() else self.legacy_state_file
-            data = json.loads(source.read_text(encoding="utf-8"))
+            data = json.loads(self.state_file.read_text(encoding="utf-8"))
         except Exception:
             return
         jobs = data.get("jobs") if isinstance(data, dict) else None

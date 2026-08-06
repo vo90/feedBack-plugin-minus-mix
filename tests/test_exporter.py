@@ -133,7 +133,6 @@ def test_export_removes_selected_audio_preserves_assets_and_never_mutates_source
         assert manifest["minus_mix"]["excluded_stems"] == ["guitar"]
         assert manifest["minus_mix"]["source_title"] == "Test Song"
         assert manifest["minus_mix"]["generator"] == "minus_mix"
-        assert "practice_mix_export" not in manifest
         assert manifest["stem_separation"]["model"] == "bs_roformer_sw"
         rendered = tmp_path / "rendered.ogg"
         rendered.write_bytes(zf.read("stems/full.ogg"))
@@ -206,9 +205,9 @@ def test_source_inspection_and_selection_validation(tmp_path, monkeypatch):
     source = tmp_path / "song.feedpak"
     manifest = {
         "title": "Song",
-        "practice_mix_export": {
+        "minus_mix": {
             "excluded_stems": ["guitar"],
-            "generator": "practice_mix_exporter",
+            "generator": "minus_mix",
         },
         "stems": [
             {"id": "full", "file": "stems/full.ogg"},

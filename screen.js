@@ -10,10 +10,6 @@
   var STORAGE_BATCH_INPUT = 'minus_mix.batch_input_dir';
   var STORAGE_BATCH_OUTPUT = 'minus_mix.batch_output_dir';
   var STORAGE_MODE = 'minus_mix.mode';
-  var LEGACY_STORAGE_OUTPUT = 'practice_mix_exporter.output_dir';
-  var LEGACY_STORAGE_BATCH_INPUT = 'practice_mix_exporter.batch_input_dir';
-  var LEGACY_STORAGE_BATCH_OUTPUT = 'practice_mix_exporter.batch_output_dir';
-  var LEGACY_STORAGE_MODE = 'practice_mix_exporter.mode';
   var fb = window.feedBack;
   var state = {
     inited: false, busy: false, selectedFilename: '', selectedLabel: '',
@@ -81,8 +77,8 @@
   function outputFolder() { return (($('pmx-output') && $('pmx-output').value) || '').trim(); }
   function batchInputFolder() { return (($('pmx-batch-input') && $('pmx-batch-input').value) || '').trim(); }
   function batchOutputFolder() { return (($('pmx-batch-output') && $('pmx-batch-output').value) || '').trim(); }
-  function storedValue(key, legacyKey, fallback) {
-    try { return localStorage.getItem(key) || localStorage.getItem(legacyKey) || fallback; }
+  function storedValue(key, fallback) {
+    try { return localStorage.getItem(key) || fallback; }
     catch (_) { return fallback; }
   }
 
@@ -683,10 +679,10 @@
     state.inited = true;
     var saved = '';
     var batchInput = '', batchOutput = '', savedMode = 'single';
-    saved = storedValue(STORAGE_OUTPUT, LEGACY_STORAGE_OUTPUT, '');
-    batchInput = storedValue(STORAGE_BATCH_INPUT, LEGACY_STORAGE_BATCH_INPUT, '');
-    batchOutput = storedValue(STORAGE_BATCH_OUTPUT, LEGACY_STORAGE_BATCH_OUTPUT, '');
-    savedMode = storedValue(STORAGE_MODE, LEGACY_STORAGE_MODE, 'single');
+    saved = storedValue(STORAGE_OUTPUT, '');
+    batchInput = storedValue(STORAGE_BATCH_INPUT, '');
+    batchOutput = storedValue(STORAGE_BATCH_OUTPUT, '');
+    savedMode = storedValue(STORAGE_MODE, 'single');
     if ($('pmx-output')) $('pmx-output').value = saved;
     if ($('pmx-batch-input')) $('pmx-batch-input').value = batchInput;
     if ($('pmx-batch-output')) $('pmx-batch-output').value = batchOutput;

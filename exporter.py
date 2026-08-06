@@ -131,12 +131,7 @@ def inspect_source(source: Path) -> SourceInfo:
         raise ExportError("the source feedpak has no full mix to subtract from")
     instruments = tuple(s for sid, s in stems.items() if sid != "full")
     arrangements = tuple(a for a in (manifest.get("arrangements") or []) if isinstance(a, dict))
-    # ``practice_mix_export`` was written by the unpublished pre-rename build.
-    # Continue recognising it so the user's existing test exports are not
-    # mistaken for originals after the public identity changed to MinusMix.
     derived = manifest.get("minus_mix")
-    if not isinstance(derived, dict):
-        derived = manifest.get("practice_mix_export")
     derived_exclusions: tuple[str, ...] = ()
     if isinstance(derived, dict) and isinstance(derived.get("excluded_stems"), list):
         derived_exclusions = tuple(
@@ -558,7 +553,6 @@ def export_minus_mix(source: Path, output_dir: Path, excluded_stems: Iterable[st
         new_manifest["stems"] = [{
             "id": "full", "file": FULL_MIX_REL, "codec": "vorbis", "default": True,
         }]
-        new_manifest.pop("practice_mix_export", None)
         new_manifest["minus_mix"] = {
             "excluded_stems": list(selected),
             "source_title": source_title,

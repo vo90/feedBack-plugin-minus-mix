@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import tempfile
 import threading
 import time
@@ -246,28 +245,3 @@ def test_batch_reserves_start_while_authoritative_scan_is_running(tmp_path):
     assert not worker.is_alive()
     assert started
     _wait(manager, started[0]["id"])
-
-
-def test_batch_reads_legacy_pre_rename_status_and_persists_under_new_name(tmp_path):
-    config = tmp_path / "config"
-    config.mkdir()
-    legacy = config / "practice_mix_batch_jobs.json"
-    legacy.write_text(json.dumps({
-        "version": 1,
-        "jobs": [{
-            "id": "legacy-job",
-            "status": "completed",
-            "created_at": "2026-08-01T00:00:00+00:00",
-            "items": [],
-        }],
-    }), encoding="utf-8")
-
-    manager = batch.BatchManager(FakeExporter(), FakeService(), config, SimpleNamespace(
-        exception=lambda *args, **kwargs: None,
-        warning=lambda *args, **kwargs: None,
-    ))
-
-    assert manager.latest()["id"] == "legacy-job"
-    with manager.lock:
-        manager._persist_locked(force=True)
-    assert (config / "minus_mix_batch_jobs.json").is_file()
