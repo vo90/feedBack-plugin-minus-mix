@@ -87,10 +87,14 @@ FeedPak instead of applying another lossy generation accidentally.
 ## Installation
 
 This repository's root is the plugin root: `plugin.json` is intentionally at the
-top level, exactly as FeedBack's Plugin Manager expects. After publishing the
-repository, copy its HTTPS clone URL into **Settings → Plugins → Install from
-Git URL**, install it, and restart FeedBack. Updates then use the Plugin Manager's
-normal Git update button.
+top level, exactly as FeedBack's Plugin Manager expects. Paste this URL into
+**Settings → Plugins → Install from Git URL**, install it, and restart FeedBack:
+
+```text
+https://github.com/vo90/feedBack-plugin-minus-mix.git
+```
+
+Updates then use the Plugin Manager's normal Git update button.
 
 Stem Splitter remains a separate optional plugin. Install its current release,
 download its server/models once, and start that server before exporting from an
