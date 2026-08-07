@@ -14,6 +14,7 @@ import pytest
 
 import batch
 import exporter
+import routes
 
 
 def _pak(path: Path, *, full: bytes = b"same full audio", guitar: bool = False,
@@ -245,3 +246,37 @@ def test_batch_reserves_start_while_authoritative_scan_is_running(tmp_path):
     assert not worker.is_alive()
     assert started
     _wait(manager, started[0]["id"])
+
+
+def test_public_batch_snapshot_is_bounded_and_keeps_actionable_rows():
+    items = [
+        {"relative_path": f"song-{index}.feedpak", "status": "queued"}
+        for index in range(routes.MAX_PUBLIC_BATCH_ITEMS + 25)
+    ]
+    items[2]["status"] = "running"
+    items[3]["status"] = "failed"
+    payload = {"id": "batch-1", "items": items}
+
+    result = routes._public_batch(payload)
+
+    assert result["items_total"] == len(items)
+    assert result["items_truncated"] is True
+    assert len(result["items"]) == routes.MAX_PUBLIC_BATCH_ITEMS
+    visible_paths = {item["relative_path"] for item in result["items"]}
+    assert "song-2.feedpak" in visible_paths
+    assert "song-3.feedpak" in visible_paths
+    assert f"song-{len(items) - 1}.feedpak" in visible_paths
+    assert payload["items"] is items
+
+
+def test_public_batch_scan_preview_keeps_source_order():
+    items = [
+        {"relative_path": f"song-{index}.feedpak", "scan_status": "ready"}
+        for index in range(routes.MAX_PUBLIC_BATCH_ITEMS + 1)
+    ]
+
+    result = routes._public_batch({"items": items}, scan=True)
+
+    assert [item["relative_path"] for item in result["items"]] == [
+        f"song-{index}.feedpak" for index in range(routes.MAX_PUBLIC_BATCH_ITEMS)
+    ]

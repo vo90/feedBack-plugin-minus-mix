@@ -129,6 +129,15 @@
   padding: .2rem .48rem; border-radius: 999px; color: #cbd5e1;
   background: rgba(148,163,184,.12); font-size: .72rem; font-weight: 700;
 }
+.practice-mix-exporter .pmx-batch-updated {
+  margin: -.2rem 0 .55rem; color: #94a3b8; font-size: .72rem;
+}
+.practice-mix-exporter .pmx-batch-updated::before {
+  content: ''; display: inline-block; width: .42rem; height: .42rem; margin-right: .38rem;
+  border-radius: 50%; background: #4ade80; vertical-align: .04rem;
+}
+.practice-mix-exporter .pmx-batch-updated.error { color: #fca5a5; }
+.practice-mix-exporter .pmx-batch-updated.error::before { background: #f87171; }
 .practice-mix-exporter .pmx-batch-items {
   max-height: 270px; overflow: auto; border-top: 1px solid rgba(148,163,184,.14);
 }
