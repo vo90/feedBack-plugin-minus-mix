@@ -11,6 +11,7 @@ from fastapi import FastAPI, HTTPException, Request
 PLUGIN_ID = "minus_mix"
 API = f"/api/plugins/{PLUGIN_ID}"
 MAX_SOURCE_RESULTS = 250
+MAX_PUBLIC_BATCH_ITEMS = 400
 DEFAULT_TARGETS = ("guitar", "bass", "drums", "vocals", "piano", "other")
 
 
@@ -25,6 +26,48 @@ def _is_loopback(request: Request) -> bool:
     if addr.is_loopback:
         return True
     return bool(getattr(addr, "ipv4_mapped", None) and addr.ipv4_mapped.is_loopback)
+
+
+def _public_batch(payload: dict | None, *, scan: bool = False) -> dict | None:
+    """Return a bounded UI snapshot while retaining actionable batch rows."""
+    if payload is None:
+        return None
+    result = dict(payload)
+    items = list(payload.get("items") or [])
+    result["items_total"] = len(items)
+    if len(items) <= MAX_PUBLIC_BATCH_ITEMS:
+        result["items"] = items
+        result["items_truncated"] = False
+        return result
+
+    if scan:
+        visible = items[:MAX_PUBLIC_BATCH_ITEMS]
+    else:
+        selected: set[int] = set()
+
+        # A running row must never disappear just because it is outside the
+        # trailing results window. Failed rows are next in priority because
+        # they contain the information a user can act on.
+        for index, item in enumerate(items):
+            if item.get("status") == "running":
+                selected.add(index)
+        for index in range(len(items) - 1, -1, -1):
+            if len(selected) >= MAX_PUBLIC_BATCH_ITEMS:
+                break
+            if items[index].get("status") == "failed":
+                selected.add(index)
+
+        # Fill the remaining bounded view with the end of the queue. Sorting
+        # the chosen indexes restores the source-folder order in the UI.
+        for index in range(len(items) - 1, -1, -1):
+            if len(selected) >= MAX_PUBLIC_BATCH_ITEMS:
+                break
+            selected.add(index)
+        visible = [items[index] for index in sorted(selected)]
+
+    result["items"] = visible
+    result["items_truncated"] = True
+    return result
 
 
 def setup(app: FastAPI, context: dict) -> None:
@@ -55,35 +98,6 @@ def setup(app: FastAPI, context: dict) -> None:
             "skip_existing": body.get("skip_existing", True) is not False,
             "skip_derived": body.get("skip_derived", True) is not False,
         }
-
-    def public_batch(payload: dict | None, *, scan: bool = False) -> dict | None:
-        if payload is None:
-            return None
-        result = dict(payload)
-        items = list(payload.get("items") or [])
-        result["items_total"] = len(items)
-        limit = 400
-        if len(items) > limit:
-            if scan:
-                visible = items[:limit]
-            else:
-                important = [item for item in items if item.get("status") in ("running", "failed")]
-                visible = important + items[-limit:]
-                deduped: list[dict] = []
-                seen: set[str] = set()
-                for item in visible:
-                    key = str(item.get("relative_path") or "")
-                    if key in seen:
-                        continue
-                    seen.add(key)
-                    deduped.append(item)
-                visible = deduped[-limit:]
-            result["items"] = visible
-            result["items_truncated"] = True
-        else:
-            result["items"] = items
-            result["items_truncated"] = False
-        return result
 
     def resolve_source(filename: str) -> Path:
         if not isinstance(filename, str) or not filename.strip():
@@ -226,7 +240,7 @@ def setup(app: FastAPI, context: dict) -> None:
         if not _is_loopback(request):
             raise HTTPException(403, "batch scanning is only available on this computer")
         try:
-            return public_batch(batch_manager.scan(**batch_options(body)), scan=True)
+            return _public_batch(batch_manager.scan(**batch_options(body)), scan=True)
         except batch_module.BatchError as exc:
             raise HTTPException(400, str(exc)) from exc
         except PermissionError as exc:
@@ -245,7 +259,7 @@ def setup(app: FastAPI, context: dict) -> None:
                     raise batch_module.BatchError(
                         "wait for the active single-song export to finish or cancel it first"
                     )
-                return public_batch(batch_manager.start(**batch_options(body)))
+                return _public_batch(batch_manager.start(**batch_options(body)))
         except batch_module.BatchError as exc:
             status_code = 409 if "already running" in str(exc) or "no new feedpaks" in str(exc) else 400
             raise HTTPException(status_code, str(exc)) from exc
@@ -256,7 +270,7 @@ def setup(app: FastAPI, context: dict) -> None:
     def batch_latest(request: Request):
         if not _is_loopback(request):
             raise HTTPException(403, "batch status is only available on this computer")
-        return {"job": public_batch(batch_manager.latest())}
+        return {"job": _public_batch(batch_manager.latest())}
 
     @app.get(f"{API}/batch/{{job_id}}")
     def batch_status(job_id: str, request: Request):
@@ -265,14 +279,14 @@ def setup(app: FastAPI, context: dict) -> None:
         job = batch_manager.get(job_id)
         if job is None:
             raise HTTPException(404, "batch job not found")
-        return public_batch(job)
+        return _public_batch(job)
 
     @app.post(f"{API}/batch/{{job_id}}/cancel")
     def batch_cancel(job_id: str, request: Request):
         if not _is_loopback(request):
             raise HTTPException(403, "batch cancellation is only available on this computer")
         try:
-            return public_batch(batch_manager.cancel(job_id))
+            return _public_batch(batch_manager.cancel(job_id))
         except batch_module.BatchError as exc:
             raise HTTPException(404, str(exc)) from exc
 

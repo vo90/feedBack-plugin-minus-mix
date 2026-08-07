@@ -1,7 +1,7 @@
 {
   "id": "minus_mix",
   "name": "MinusMix",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Create playable songs without the instrument parts you choose.",
   "script": "screen.js",
   "screen": "screen.html",

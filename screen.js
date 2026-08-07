@@ -10,6 +10,9 @@
   var STORAGE_BATCH_INPUT = 'minus_mix.batch_input_dir';
   var STORAGE_BATCH_OUTPUT = 'minus_mix.batch_output_dir';
   var STORAGE_MODE = 'minus_mix.mode';
+  var BATCH_POLL_MS = 2000;
+  var BACKGROUND_POLL_MS = 15000;
+  var POLL_RETRY_MAX_MS = 30000;
   var fb = window.feedBack;
   var state = {
     inited: false, busy: false, selectedFilename: '', selectedLabel: '',
@@ -18,6 +21,8 @@
     singleJobId: '', singlePollTimer: null, singleNotifiedId: '',
     batchScan: null, batchScanKey: '', batchJobId: '', batchPollTimer: null,
     batchBusy: false, batchActive: false, batchNotifiedId: '',
+    batchPollLoading: false, batchPollFailures: 0,
+    batchRenderKey: '', batchItemRows: Object.create(null),
     separation: { available: false, ready: false, reason: 'Checking the Stem Splitter server…' },
   };
 
@@ -26,6 +31,15 @@
     return String(value == null ? '' : value)
       .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
       .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+  function setNodeText(node, value) {
+    if (!node) return;
+    value = String(value == null ? '' : value);
+    if (node.textContent !== value) node.textContent = value;
+  }
+  function setNodeHtml(node, value) {
+    if (!node || node.innerHTML === value) return;
+    node.innerHTML = value;
   }
   function jsonFetch(path, options) {
     return fetch(API + path, options).then(async function (response) {
@@ -80,6 +94,42 @@
   function storedValue(key, fallback) {
     try { return localStorage.getItem(key) || fallback; }
     catch (_) { return fallback; }
+  }
+
+  function screenIsVisible() {
+    var screen = document.getElementById(SCREEN_ID);
+    return !!(screen && screen.classList.contains('active') && !document.hidden);
+  }
+
+  function pauseScreenPolling() {
+    clearTimeout(state.statusRetryTimer);
+    clearTimeout(state.singlePollTimer);
+    clearTimeout(state.batchPollTimer);
+    state.statusRetryTimer = null;
+    state.singlePollTimer = null;
+    state.batchPollTimer = null;
+    // Keep a low-frequency job heartbeat so completion notifications still
+    // work on other screens without continuously updating the hidden UI.
+    scheduleSinglePoll(BACKGROUND_POLL_MS);
+    scheduleBatchPoll(BACKGROUND_POLL_MS);
+  }
+
+  function scheduleSinglePoll(delay) {
+    clearTimeout(state.singlePollTimer);
+    state.singlePollTimer = null;
+    if (state.busy && state.singleJobId) {
+      state.singlePollTimer = setTimeout(pollSingleExport,
+        screenIsVisible() ? delay : Math.max(delay, BACKGROUND_POLL_MS));
+    }
+  }
+
+  function scheduleBatchPoll(delay) {
+    clearTimeout(state.batchPollTimer);
+    state.batchPollTimer = null;
+    if (state.batchActive && state.batchJobId) {
+      state.batchPollTimer = setTimeout(pollBatch,
+        screenIsVisible() ? delay : Math.max(delay, BACKGROUND_POLL_MS));
+    }
   }
 
   function selectionNeedsSeparation(stems) {
@@ -274,15 +324,11 @@
     state.busy = active;
     var progress = $('pmx-single-progress');
     if (progress) progress.hidden = false;
-    if ($('pmx-single-progress-title')) {
-      $('pmx-single-progress-title').textContent = job.status === 'completed'
-        ? 'MinusMix FeedPak created' : job.status === 'canceled' ? 'Export canceled'
-          : job.status === 'failed' ? 'Export failed' : stageLabel(job.stage);
-    }
-    if ($('pmx-single-current')) {
-      $('pmx-single-current').textContent = stageLabel(job.stage)
-        + (job.detail ? ' — ' + job.detail : '');
-    }
+    setNodeText($('pmx-single-progress-title'), job.status === 'completed'
+      ? 'MinusMix FeedPak created' : job.status === 'canceled' ? 'Export canceled'
+        : job.status === 'failed' ? 'Export failed' : stageLabel(job.stage));
+    setNodeText($('pmx-single-current'), stageLabel(job.stage)
+      + (job.detail ? ' — ' + job.detail : ''));
     if ($('pmx-single-progress-bar')) {
       $('pmx-single-progress-bar').value = Number(job.progress || 0);
     }
@@ -290,10 +336,13 @@
       $('pmx-single-cancel').disabled = !active || job.status === 'canceling';
     }
 
-    clearTimeout(state.singlePollTimer);
     if (active) {
-      state.singlePollTimer = setTimeout(pollSingleExport, 750);
-    } else if (job.status === 'completed' && job.result) {
+      scheduleSinglePoll(1000);
+    } else {
+      clearTimeout(state.singlePollTimer);
+      state.singlePollTimer = null;
+    }
+    if (!active && job.status === 'completed' && job.result) {
       var result = job.result;
       var temporary = result.temporary_separation_used ? ' Temporary separator files were deleted.' : '';
       showStatus('ok', 'Created ' + result.filename + ' at ' + result.path
@@ -302,9 +351,9 @@
         state.singleNotifiedId = job.id;
         notify('MinusMix FeedPak created', result.filename, 'ok');
       }
-    } else if (job.status === 'canceled') {
+    } else if (!active && job.status === 'canceled') {
       showStatus('info', 'Export canceled safely. The source FeedPak was not changed.');
-    } else if (job.status === 'failed') {
+    } else if (!active && job.status === 'failed') {
       showStatus('error', job.detail || 'MinusMix export failed.');
       if (job.id && state.singleNotifiedId !== job.id) {
         state.singleNotifiedId = job.id;
@@ -319,7 +368,7 @@
     if (!state.singleJobId) return;
     jsonFetch('/export/' + encodeURIComponent(state.singleJobId)).then(renderSingleJob).catch(function (error) {
       showStatus('error', 'Could not refresh export status: ' + error.message);
-      state.singlePollTimer = setTimeout(pollSingleExport, 2500);
+      scheduleSinglePoll(2500);
     });
   }
 
@@ -441,20 +490,118 @@
     }).catch(function (error) { showBatchStatus('error', String(error)); });
   }
 
-  function renderBatchItems(items, scanMode) {
+  function batchItemKey(item, index) {
+    return String(item.relative_path || item.output_relative || item.title || ('Feedpak ' + index));
+  }
+
+  function resetBatchItems(renderKey) {
+    var root = $('pmx-batch-items');
+    if (root) root.textContent = '';
+    state.batchRenderKey = renderKey || '';
+    state.batchItemRows = Object.create(null);
+  }
+
+  function createBatchItemRow() {
+    var row = document.createElement('div');
+    var statusNode = document.createElement('b');
+    var body = document.createElement('div');
+    var nameNode = document.createElement('span');
+    var detailNode = document.createElement('small');
+    body.appendChild(nameNode);
+    body.appendChild(detailNode);
+    row.appendChild(statusNode);
+    row.appendChild(body);
+    row._minusMixNodes = { status: statusNode, name: nameNode, detail: detailNode };
+    row._minusMixSignature = '';
+    return row;
+  }
+
+  function updateBatchItemRow(row, item, scanMode) {
+    var status = String(scanMode ? (item.scan_status || 'ready') : (item.status || 'queued'));
+    var detail = String(item.detail || item.reason
+      || (item.needs_separation ? 'Temporary separation' : 'Saved stem'));
+    var name = String(item.relative_path || item.title || 'Feedpak');
+    var signature = status + '\u0000' + name + '\u0000' + detail;
+    if (row._minusMixSignature === signature) return;
+    row._minusMixSignature = signature;
+    row.className = 'pmx-batch-item ' + status.toLowerCase().replace(/[^a-z0-9_-]/g, '');
+    row._minusMixNodes.status.textContent = status;
+    row._minusMixNodes.name.textContent = name;
+    row._minusMixNodes.detail.textContent = detail;
+  }
+
+  function renderBatchItems(items, scanMode, renderKey) {
     var root = $('pmx-batch-items');
     if (!root) return;
     items = Array.isArray(items) ? items : [];
+    renderKey = renderKey || (scanMode ? 'scan' : 'job');
+    if (state.batchRenderKey !== renderKey) resetBatchItems(renderKey);
+
     if (!items.length) {
-      root.innerHTML = '<p class="pmx-help">No per-file results to show.</p>';
+      if (!root.firstChild || !root.firstChild.classList.contains('pmx-empty')) {
+        root.textContent = '';
+        var empty = document.createElement('p');
+        empty.className = 'pmx-help pmx-empty';
+        empty.textContent = 'No per-file results to show.';
+        root.appendChild(empty);
+      }
+      state.batchItemRows = Object.create(null);
       return;
     }
-    root.innerHTML = items.map(function (item) {
-      var status = scanMode ? (item.scan_status || 'ready') : (item.status || 'queued');
-      var detail = item.detail || item.reason || (item.needs_separation ? 'Temporary separation' : 'Saved stem');
-      return '<div class="pmx-batch-item ' + esc(status) + '"><b>' + esc(status) + '</b><div>'
-        + esc(item.relative_path || item.title || 'Feedpak') + '<small>' + esc(detail) + '</small></div></div>';
-    }).join('');
+
+    var seen = Object.create(null);
+    var entries = items.map(function (item, index) {
+      var key = batchItemKey(item, index);
+      seen[key] = true;
+      return { key: key, item: item };
+    });
+
+    Object.keys(state.batchItemRows).forEach(function (key) {
+      if (seen[key]) return;
+      var stale = state.batchItemRows[key];
+      if (stale.parentNode === root) root.removeChild(stale);
+      delete state.batchItemRows[key];
+    });
+    var emptyNode = root.querySelector('.pmx-empty');
+    if (emptyNode) emptyNode.remove();
+
+    var previous = null;
+    entries.forEach(function (entry) {
+      var row = state.batchItemRows[entry.key];
+      if (!row) {
+        row = createBatchItemRow();
+        state.batchItemRows[entry.key] = row;
+      }
+      updateBatchItemRow(row, entry.item, scanMode);
+      var expected = previous ? previous.nextSibling : root.firstChild;
+      if (row !== expected) root.insertBefore(row, expected);
+      previous = row;
+    });
+  }
+
+  function renderBatchItemsNote(payload, scanMode) {
+    var note = $('pmx-batch-items-note');
+    if (!note) return;
+    var shown = Array.isArray(payload.items) ? payload.items.length : 0;
+    var total = Number(payload.items_total || shown);
+    note.hidden = !payload.items_truncated;
+    note.textContent = payload.items_truncated
+      ? (scanMode ? 'Showing the first ' : 'Showing the most relevant ')
+        + shown + ' of ' + total + ' per-file results. Summary counts include the whole batch.'
+      : '';
+  }
+
+  function renderBatchHeartbeat(kind, text) {
+    var node = $('pmx-batch-updated');
+    if (!node) return;
+    node.className = 'pmx-batch-updated ' + (kind || 'ok');
+    node.textContent = text || '';
+  }
+
+  function refreshedAtText(active) {
+    var time = new Date().toLocaleTimeString();
+    return (active ? 'Live status checked ' : 'Final status confirmed ') + time
+      + (active ? ' · Processing continues safely if you leave this screen.' : '');
   }
 
   function renderBatchScan(scan, optionsKey) {
@@ -482,7 +629,8 @@
         + '<span>' + (counts.invalid || 0) + ' invalid</span>';
     }
     if ($('pmx-batch-cancel')) $('pmx-batch-cancel').disabled = true;
-    renderBatchItems(scan.items, true);
+    renderBatchItems(scan.items, true, 'scan:' + (optionsKey || batchOptionsKey()));
+    renderBatchItemsNote(scan, true);
     updateBatchReady();
   }
 
@@ -517,42 +665,45 @@
     state.batchJobId = job.id || '';
     var active = ['queued', 'running', 'canceling'].indexOf(job.status) >= 0;
     state.batchActive = active;
+    state.batchPollFailures = 0;
     var progress = $('pmx-batch-progress');
     if (progress) progress.hidden = false;
-    if ($('pmx-batch-progress-title')) {
-      $('pmx-batch-progress-title').textContent = job.status === 'completed'
-        ? 'Batch completed' : job.status === 'canceled' ? 'Batch canceled'
-          : job.status === 'failed' || job.status === 'interrupted' ? 'Batch stopped' : 'Batch running';
-    }
+    setNodeText($('pmx-batch-progress-title'), job.status === 'completed'
+      ? 'Batch completed' : job.status === 'canceled' ? 'Batch canceled'
+        : job.status === 'failed' || job.status === 'interrupted' ? 'Batch stopped' : 'Batch running');
     if ($('pmx-batch-current')) {
       var runningItem = (job.items || []).find(function (item) { return item.status === 'running'; });
       var position = job.current_item_number
         ? 'Song ' + job.current_item_number + ' of ' + (job.items_total || (job.items || []).length) + ' — '
         : '';
-      $('pmx-batch-current').textContent = job.current_relative_path
+      setNodeText($('pmx-batch-current'), job.current_relative_path
         ? position + job.current_relative_path + ' — '
           + stageLabel((runningItem && runningItem.stage) || job.status)
           + (job.detail ? ': ' + job.detail : '')
-        : (job.detail || '');
+        : (job.detail || ''));
     }
     if ($('pmx-batch-progress-bar')) $('pmx-batch-progress-bar').value = Number(job.overall_progress || 0);
     var counts = job.counts || {};
-    if ($('pmx-batch-counts')) {
-      $('pmx-batch-counts').innerHTML = '<span>' + (counts.done || 0) + ' created</span>'
-        + '<span>' + (counts.queued || 0) + ' waiting</span>'
-        + '<span>' + (counts.skipped || 0) + ' skipped</span>'
-        + '<span>' + (counts.failed || 0) + ' failed</span>'
-        + '<span>' + (counts.duplicate_audio_reused || 0) + ' duplicate splits reused</span>';
-    }
+    setNodeHtml($('pmx-batch-counts'), '<span>' + (counts.done || 0) + ' created</span>'
+      + '<span>' + (counts.queued || 0) + ' waiting</span>'
+      + '<span>' + (counts.skipped || 0) + ' skipped</span>'
+      + '<span>' + (counts.failed || 0) + ' failed</span>'
+      + '<span>' + (counts.duplicate_audio_reused || 0) + ' duplicate splits reused</span>');
     if ($('pmx-batch-cancel')) $('pmx-batch-cancel').disabled = !active || job.status === 'canceling';
-    renderBatchItems(job.items, false);
+    if ($('pmx-batch-refresh')) $('pmx-batch-refresh').disabled = false;
+    renderBatchItems(job.items, false, 'job:' + (job.id || 'latest'));
+    renderBatchItemsNote(job, false);
+    renderBatchHeartbeat('ok', refreshedAtText(active));
     updateReady();
     updateBatchReady();
 
-    clearTimeout(state.batchPollTimer);
     if (active) {
-      state.batchPollTimer = setTimeout(pollBatch, 1000);
-    } else if (job.id && state.batchNotifiedId !== job.id) {
+      scheduleBatchPoll(BATCH_POLL_MS);
+    } else {
+      clearTimeout(state.batchPollTimer);
+      state.batchPollTimer = null;
+    }
+    if (!active && job.id && state.batchNotifiedId !== job.id) {
       state.batchNotifiedId = job.id;
       if (job.status === 'completed') {
         showBatchStatus((counts.failed || 0) ? 'error' : 'ok', job.detail || 'Batch completed.');
@@ -569,10 +720,21 @@
   }
 
   function pollBatch() {
-    if (!state.batchJobId) return;
+    var manual = arguments[0] === true;
+    if (!state.batchJobId || state.batchPollLoading) return;
+    state.batchPollLoading = true;
+    if ($('pmx-batch-refresh')) $('pmx-batch-refresh').disabled = true;
     jsonFetch('/batch/' + encodeURIComponent(state.batchJobId)).then(renderBatchJob).catch(function (error) {
-      showBatchStatus('error', 'Could not refresh batch status: ' + error.message);
-      state.batchPollTimer = setTimeout(pollBatch, 2500);
+      state.batchPollFailures += 1;
+      var delay = Math.min(POLL_RETRY_MAX_MS,
+        2500 * Math.pow(2, Math.min(state.batchPollFailures - 1, 3)));
+      renderBatchHeartbeat('error', 'Status refresh failed at ' + new Date().toLocaleTimeString()
+        + '. The conversion may still be running; retrying automatically.');
+      if (manual) showBatchStatus('error', 'Could not refresh batch status: ' + error.message);
+      scheduleBatchPoll(delay);
+    }).finally(function () {
+      state.batchPollLoading = false;
+      if ($('pmx-batch-refresh')) $('pmx-batch-refresh').disabled = false;
     });
   }
 
@@ -584,7 +746,9 @@
         }
         renderBatchJob(data.job);
       }
-    }).catch(function () {});
+    }).catch(function (error) {
+      renderBatchHeartbeat('error', 'Could not restore the latest batch status: ' + error.message);
+    });
   }
 
   function startBatch() {
@@ -664,8 +828,7 @@
     }).finally(function () {
       state.statusLoading = false;
       if ($('pmx-engine-refresh')) $('pmx-engine-refresh').disabled = false;
-      var screen = document.getElementById(SCREEN_ID);
-      if (screen && screen.classList.contains('active')) {
+      if (screenIsVisible()) {
         var delay = state.separation && state.separation.ready ? 10000 : 3000;
         state.statusRetryTimer = setTimeout(refreshStatus, delay);
       }
@@ -704,6 +867,10 @@
     $('pmx-batch-scan').addEventListener('click', scanBatch);
     $('pmx-batch-start').addEventListener('click', startBatch);
     $('pmx-batch-cancel').addEventListener('click', cancelBatch);
+    $('pmx-batch-refresh').addEventListener('click', function () {
+      if (state.batchJobId) pollBatch(true);
+      else loadLatestBatch();
+    });
     ['pmx-batch-recursive', 'pmx-batch-skip-existing', 'pmx-batch-skip-derived'].forEach(function (id) {
       $(id).addEventListener('change', invalidateBatchScan);
     });
@@ -724,13 +891,38 @@
 
   function onScreenChanged(event) {
     var id = event && event.detail && event.detail.id;
-    if (id === SCREEN_ID) { wireScreen(); refreshStatus(); }
-    else clearTimeout(state.statusRetryTimer);
+    if (id === SCREEN_ID) {
+      if (!state.inited) {
+        wireScreen();
+        return;
+      }
+      // Some host builds emit screen:changed immediately before applying the
+      // active class. Deferring one tick makes resume reliable in both orders.
+      setTimeout(function () {
+        if (!screenIsVisible()) return;
+        refreshStatus();
+        loadLatestSingleExport();
+        loadLatestBatch();
+      }, 0);
+    } else {
+      pauseScreenPolling();
+    }
+  }
+
+  function onVisibilityChanged() {
+    if (!screenIsVisible()) {
+      pauseScreenPolling();
+      return;
+    }
+    refreshStatus();
+    loadLatestSingleExport();
+    loadLatestBatch();
   }
 
   function boot() {
     registerCardAction();
     if (fb && fb.on) fb.on('screen:changed', onScreenChanged);
+    document.addEventListener('visibilitychange', onVisibilityChanged);
     var screen = document.getElementById(SCREEN_ID);
     if (screen && screen.classList.contains('active')) wireScreen();
   }

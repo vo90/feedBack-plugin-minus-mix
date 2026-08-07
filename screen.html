@@ -71,11 +71,11 @@
 
   <div id="pmx-status" class="pmx-status" role="status" aria-live="polite"></div>
 
-  <section id="pmx-single-progress" class="pmx-batch-progress" hidden aria-live="polite">
+  <section id="pmx-single-progress" class="pmx-batch-progress" hidden>
     <div class="pmx-progress-heading">
       <div>
         <strong id="pmx-single-progress-title">Export queued</strong>
-        <p id="pmx-single-current" class="pmx-help"></p>
+        <p id="pmx-single-current" class="pmx-help" role="status" aria-live="polite"></p>
       </div>
       <button id="pmx-single-cancel" class="pmx-button pmx-danger" type="button">Cancel safely</button>
     </div>
@@ -145,16 +145,21 @@
 
     <div id="pmx-batch-status" class="pmx-status" role="status" aria-live="polite"></div>
 
-    <section id="pmx-batch-progress" class="pmx-batch-progress" hidden aria-live="polite">
+    <section id="pmx-batch-progress" class="pmx-batch-progress" hidden>
       <div class="pmx-progress-heading">
         <div>
           <strong id="pmx-batch-progress-title">Batch queued</strong>
-          <p id="pmx-batch-current" class="pmx-help"></p>
+          <p id="pmx-batch-current" class="pmx-help" role="status" aria-live="polite"></p>
         </div>
-        <button id="pmx-batch-cancel" class="pmx-button pmx-danger" type="button">Cancel safely</button>
+        <div class="pmx-actions">
+          <button id="pmx-batch-refresh" class="pmx-button pmx-secondary" type="button">Refresh progress</button>
+          <button id="pmx-batch-cancel" class="pmx-button pmx-danger" type="button">Cancel safely</button>
+        </div>
       </div>
       <progress id="pmx-batch-progress-bar" max="1" value="0"></progress>
       <div id="pmx-batch-counts" class="pmx-counts"></div>
+      <p id="pmx-batch-updated" class="pmx-batch-updated" aria-live="off"></p>
+      <p id="pmx-batch-items-note" class="pmx-help" hidden></p>
       <div id="pmx-batch-items" class="pmx-batch-items"></div>
     </section>
   </div>

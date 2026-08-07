@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.5.1
+
+- Made long-running batch progress memory-stable by updating existing result
+  rows instead of rebuilding the full list on every status refresh.
+- Throttled job polling when MinusMix is not visible and restored authoritative
+  status when the user returns, while retaining completion notifications.
+- Added a live status timestamp, manual progress refresh and bounded large-batch
+  result views that retain active and failed items.
+- Limited accessibility announcements to concise progress text rather than the
+  complete changing result list.
+
 ## 0.5.0
 
 - Renamed the plugin from Practice Mix Exporter to MinusMix.
