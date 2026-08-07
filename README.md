@@ -84,7 +84,29 @@ FeedPak instead of applying another lossy generation accidentally.
 - Converting a FeedPak that already contains the selected stems does not require
   the server.
 
-## Installation
+## Installation without Git
+
+Download the versioned `MinusMix-<version>.zip` from the
+[latest MinusMix release](https://github.com/vo90/feedBack-plugin-minus-mix/releases/latest),
+close FeedBack, and extract the archive directly into FeedBack's `plugins`
+directory:
+
+| Platform | Plugin directory |
+| --- | --- |
+| Windows | `%APPDATA%\feedback-desktop\plugins` |
+| macOS | `~/Library/Application Support/feedback-desktop/plugins` |
+| Linux | `~/.config/feedback-desktop/plugins` (or `$XDG_CONFIG_HOME/feedback-desktop/plugins`) |
+
+The finished layout must be `plugins/minus_mix/plugin.json`. If it instead
+looks like `plugins/minus_mix/minus_mix/plugin.json`, move the inner folder up
+one level. Restart FeedBack and MinusMix will appear in the Plugins section.
+
+Manual installations do not need Git. FeedBack's Git update button will not
+apply to them: to update, close FeedBack and replace the existing `minus_mix`
+folder with the one from the newest release ZIP. MinusMix stores no user
+FeedPaks or exports inside its own plugin folder.
+
+## Installation with Git
 
 This repository's root is the plugin root: `plugin.json` is intentionally at the
 top level, exactly as FeedBack's Plugin Manager expects. Paste this URL into

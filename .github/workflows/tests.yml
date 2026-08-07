@@ -25,3 +25,5 @@ jobs:
           python -m pip install -r requirements-dev.txt
       - name: Run tests
         run: python -m pytest -q
+      - name: Verify manual-install archive
+        run: python scripts/build_release.py
