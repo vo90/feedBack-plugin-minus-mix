@@ -1,0 +1,40 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Validate tag version
+        if: github.ref_type == 'tag'
+        shell: bash
+        run: python scripts/build_release.py --expected-version "${GITHUB_REF_NAME#v}"
+      - name: Build manual-install archive
+        if: github.ref_type != 'tag'
+        run: python scripts/build_release.py
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MinusMix-${{ github.ref_name }}
+          path: dist/MinusMix-*.zip
+          if-no-files-found: error
+      - name: Publish GitHub release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: >-
+          gh release create "$GITHUB_REF_NAME" dist/MinusMix-*.zip
+          --verify-tag --generate-notes --title "MinusMix ${GITHUB_REF_NAME#v}"
