@@ -1,6 +1,95 @@
 /* MinusMix — screen UI + library card action. */
-(function () {
+(function (root) {
   'use strict';
+
+  function sourceResultIsCurrent(requestId, currentRequestId) {
+    return requestId === currentRequestId;
+  }
+
+  function resolvedSourceSelection(songs, explicitPreselect, selectedFilename) {
+    if (!Array.isArray(songs) || !songs.length) return '';
+    var wanted = explicitPreselect || selectedFilename || '';
+    if (wanted && songs.some(function (song) { return song.filename === wanted; })) {
+      return wanted;
+    }
+    // Card actions remain authoritative even beyond the bounded search result.
+    return explicitPreselect || '';
+  }
+
+  function engineStatusPresentation(needsSeparation, contextKnown, engine) {
+    engine = engine || {};
+    if (!needsSeparation) {
+      return {
+        kind: 'not-needed',
+        text: contextKnown
+          ? 'Stem Splitter is not required for the current selection.'
+          : 'Stem Splitter is only required when selected audio is not already saved.',
+      };
+    }
+    return {
+      kind: engine.ready ? 'ready' : 'not-ready',
+      text: engine.ready
+        ? 'Stem Splitter server ready — ' + (engine.reason || 'temporary separation available')
+        : 'Temporary separation unavailable — '
+          + (engine.reason || 'start the server in Stem Splitter'),
+    };
+  }
+
+  function nextTabIndex(current, key, count) {
+    if (key === 'ArrowRight' || key === 'ArrowDown') return (current + 1) % count;
+    if (key === 'ArrowLeft' || key === 'ArrowUp') return (current + count - 1) % count;
+    if (key === 'Home') return 0;
+    if (key === 'End') return count - 1;
+    return null;
+  }
+
+  function createApiClient(request) {
+    function post(path, payload) {
+      return request(path, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload || {}),
+      });
+    }
+    return {
+      status: function () { return request('/status'); },
+      sources: function (query) { return request('/sources?q=' + encodeURIComponent(query || '')); },
+      source: function (filename) {
+        return request('/source?filename=' + encodeURIComponent(filename));
+      },
+      startExport: function (payload) { return post('/export', payload); },
+      latestExport: function () { return request('/export/latest'); },
+      exportStatus: function (jobId) { return request('/export/' + encodeURIComponent(jobId)); },
+      cancelExport: function (jobId) {
+        return post('/export/' + encodeURIComponent(jobId) + '/cancel');
+      },
+      startScan: function (payload) { return post('/batch/scan-jobs', payload); },
+      scanStatus: function (jobId) {
+        return request('/batch/scan-jobs/' + encodeURIComponent(jobId));
+      },
+      cancelScan: function (jobId) {
+        return post('/batch/scan-jobs/' + encodeURIComponent(jobId) + '/cancel');
+      },
+      startBatch: function (payload) { return post('/batch/start', payload); },
+      latestBatch: function () { return request('/batch/latest'); },
+      batchStatus: function (jobId) { return request('/batch/' + encodeURIComponent(jobId)); },
+      cancelBatch: function (jobId) {
+        return post('/batch/' + encodeURIComponent(jobId) + '/cancel');
+      },
+    };
+  }
+
+  if (!root || !root.document) {
+    if (typeof module !== 'undefined' && module.exports) {
+      module.exports = {
+        sourceResultIsCurrent, resolvedSourceSelection,
+        engineStatusPresentation, nextTabIndex, createApiClient,
+      };
+    }
+    return;
+  }
+  var window = root;
+  var document = root.document;
   if (window.__minusMixLoaded) return;
   window.__minusMixLoaded = true;
 
@@ -9,6 +98,7 @@
   var STORAGE_OUTPUT = 'minus_mix.output_dir';
   var STORAGE_BATCH_INPUT = 'minus_mix.batch_input_dir';
   var STORAGE_BATCH_OUTPUT = 'minus_mix.batch_output_dir';
+  var STORAGE_BATCH_LAYOUT = 'minus_mix.batch_output_layout';
   var STORAGE_MODE = 'minus_mix.mode';
   var BATCH_POLL_MS = 2000;
   var BACKGROUND_POLL_MS = 15000;
@@ -16,10 +106,11 @@
   var fb = window.feedBack;
   var state = {
     inited: false, busy: false, selectedFilename: '', selectedLabel: '',
-    sourceInfo: null, searchTimer: null, ffmpegAvailable: true,
+    sourceInfo: null, searchTimer: null, sourceRequestId: 0, ffmpegAvailable: true,
     statusRetryTimer: null, statusLoading: false,
     singleJobId: '', singlePollTimer: null, singleNotifiedId: '',
     batchScan: null, batchScanKey: '', batchJobId: '', batchPollTimer: null,
+    batchScanJobId: '', batchScanPollTimer: null, batchScanRequestKey: '',
     batchBusy: false, batchActive: false, batchNotifiedId: '',
     batchPollLoading: false, batchPollFailures: 0,
     batchRenderKey: '', batchItemRows: Object.create(null),
@@ -52,6 +143,7 @@
       return data || {};
     });
   }
+  var apiClient = createApiClient(jsonFetch);
   function notify(title, message, accent) {
     try {
       if (window.fbNotify && window.fbNotify.show) {
@@ -91,6 +183,10 @@
   function outputFolder() { return (($('pmx-output') && $('pmx-output').value) || '').trim(); }
   function batchInputFolder() { return (($('pmx-batch-input') && $('pmx-batch-input').value) || '').trim(); }
   function batchOutputFolder() { return (($('pmx-batch-output') && $('pmx-batch-output').value) || '').trim(); }
+  function batchPreservesStructure() {
+    var selected = document.querySelector('input[name="pmx-batch-layout"]:checked');
+    return !selected || selected.value === 'preserve';
+  }
   function storedValue(key, fallback) {
     try { return localStorage.getItem(key) || fallback; }
     catch (_) { return fallback; }
@@ -105,13 +201,16 @@
     clearTimeout(state.statusRetryTimer);
     clearTimeout(state.singlePollTimer);
     clearTimeout(state.batchPollTimer);
+    clearTimeout(state.batchScanPollTimer);
     state.statusRetryTimer = null;
     state.singlePollTimer = null;
     state.batchPollTimer = null;
+    state.batchScanPollTimer = null;
     // Keep a low-frequency job heartbeat so completion notifications still
     // work on other screens without continuously updating the hidden UI.
     scheduleSinglePoll(BACKGROUND_POLL_MS);
     scheduleBatchPoll(BACKGROUND_POLL_MS);
+    scheduleBatchScanPoll(BACKGROUND_POLL_MS);
   }
 
   function scheduleSinglePoll(delay) {
@@ -132,6 +231,15 @@
     }
   }
 
+  function scheduleBatchScanPoll(delay) {
+    clearTimeout(state.batchScanPollTimer);
+    state.batchScanPollTimer = null;
+    if (state.batchBusy && state.batchScanJobId) {
+      state.batchScanPollTimer = setTimeout(pollBatchScan,
+        screenIsVisible() ? delay : Math.max(delay, BACKGROUND_POLL_MS));
+    }
+  }
+
   function selectionNeedsSeparation(stems) {
     if (!state.sourceInfo || !Array.isArray(state.sourceInfo.stems)) return false;
     return stems.some(function (stemId) {
@@ -144,10 +252,15 @@
     var root = $('pmx-engine'), text = $('pmx-engine-text');
     if (!root || !text) return;
     var engine = state.separation || {};
-    root.className = 'pmx-engine ' + (engine.ready ? 'ready' : 'not-ready');
-    text.textContent = engine.ready
-      ? 'Stem Splitter server ready — ' + (engine.reason || 'temporary separation available')
-      : 'Temporary separation unavailable — ' + (engine.reason || 'start the server in Stem Splitter');
+    var batchMode = !!($('pmx-batch-panel') && !$('pmx-batch-panel').hidden);
+    var currentScan = state.batchScan && state.batchScanKey === batchOptionsKey();
+    var contextKnown = batchMode ? !!currentScan : !!state.sourceInfo;
+    var needsSeparation = batchMode
+      ? !!(currentScan && currentScan.counts && currentScan.counts.needs_separation)
+      : selectionNeedsSeparation(selectedStems());
+    var presentation = engineStatusPresentation(needsSeparation, contextKnown, engine);
+    root.className = 'pmx-engine ' + presentation.kind;
+    text.textContent = presentation.text;
   }
 
   function renderSourceWarning(info) {
@@ -162,6 +275,7 @@
   }
 
   function updateReady() {
+    renderEngineStatus();
     var stems = selectedStems();
     var needsSeparation = selectionNeedsSeparation(stems);
     var engineOkay = !needsSeparation || !!(state.separation && state.separation.ready);
@@ -218,19 +332,20 @@
 
   function chooseSource(filename) {
     if (!filename) return;
+    var sourceRequestId = state.sourceRequestId;
     state.selectedFilename = filename;
     state.sourceInfo = null;
     renderSourceWarning(null);
     renderStems(null);
     updateReady();
-    jsonFetch('/source?filename=' + encodeURIComponent(filename)).then(function (info) {
-      if (state.selectedFilename !== filename) return;
+    apiClient.source(filename).then(function (info) {
+      if (state.selectedFilename !== filename || state.sourceRequestId !== sourceRequestId) return;
       state.sourceInfo = info;
       renderStems(info);
       renderSourceWarning(info);
       showStatus('info', 'Selected ' + (info.artist ? info.artist + ' — ' : '') + info.title + '.');
     }).catch(function (error) {
-      if (state.selectedFilename !== filename) return;
+      if (state.selectedFilename !== filename || state.sourceRequestId !== sourceRequestId) return;
       state.sourceInfo = null;
       renderSourceWarning(null);
       renderStems(null);
@@ -238,13 +353,31 @@
     });
   }
 
+  function clearSourceSelection() {
+    state.selectedFilename = '';
+    state.selectedLabel = '';
+    state.sourceInfo = null;
+    renderSourceWarning(null);
+    renderStems(null);
+    updateReady();
+  }
+
   function loadSources(preselect) {
     var select = $('pmx-source');
     if (!select) return Promise.resolve();
+    var requestId = ++state.sourceRequestId;
+    var explicitPreselect = typeof preselect === 'string' && preselect ? preselect : '';
     var q = (($('pmx-search') && $('pmx-search').value) || '').trim();
+    // A new result set invalidates any in-flight source-detail response and
+    // temporarily disables export until the visible selection is reconciled.
+    state.sourceInfo = null;
+    renderSourceWarning(null);
+    renderStems(null);
+    updateReady();
     select.disabled = true;
     select.innerHTML = '<option>Loading feedpaks…</option>';
-    return jsonFetch('/sources?q=' + encodeURIComponent(q)).then(function (data) {
+    return apiClient.sources(q).then(function (data) {
+      if (!sourceResultIsCurrent(requestId, state.sourceRequestId)) return;
       var songs = data.songs || [];
       select.innerHTML = songs.map(function (song) {
         var text = (song.artist ? song.artist + ' — ' : '') + song.title;
@@ -253,26 +386,32 @@
       select.disabled = false;
       if (!songs.length) {
         select.innerHTML = '<option disabled>No feedpaks found</option>';
+        clearSourceSelection();
         return;
       }
-      var wanted = preselect || state.selectedFilename;
-      if (wanted && songs.some(function (song) { return song.filename === wanted; })) {
-        select.value = wanted;
-        chooseSource(wanted);
-      } else if (wanted) {
+      var resolved = resolvedSourceSelection(songs, explicitPreselect, state.selectedFilename);
+      if (resolved && songs.some(function (song) { return song.filename === resolved; })) {
+        select.value = resolved;
+        chooseSource(resolved);
+      } else if (resolved) {
         // A card action is authoritative even when this screen's source list is
         // capped for a very large library. Keep the selected song usable rather
         // than silently losing it because it sorted after the first 250 rows.
         var option = document.createElement('option');
-        option.value = wanted;
-        option.textContent = state.selectedLabel || wanted;
+        option.value = resolved;
+        option.textContent = state.selectedLabel || resolved;
         select.insertBefore(option, select.firstChild);
-        select.value = wanted;
-        chooseSource(wanted);
+        select.value = resolved;
+        chooseSource(resolved);
+      } else {
+        select.selectedIndex = -1;
+        clearSourceSelection();
       }
     }).catch(function (error) {
+      if (!sourceResultIsCurrent(requestId, state.sourceRequestId)) return;
       select.innerHTML = '<option disabled>Could not load songs</option>';
       select.disabled = false;
+      clearSourceSelection();
       showStatus('error', error.message);
     });
   }
@@ -345,8 +484,10 @@
     if (!active && job.status === 'completed' && job.result) {
       var result = job.result;
       var temporary = result.temporary_separation_used ? ' Temporary separator files were deleted.' : '';
+      var preview = result.preview_created === false
+        ? ' The FeedPak was created successfully, but its optional preview could not be generated.' : '';
       showStatus('ok', 'Created ' + result.filename + ' at ' + result.path
-        + '. The original feedpak was not changed.' + temporary);
+        + '. The original feedpak was not changed.' + temporary + preview);
       if (job.id && state.singleNotifiedId !== job.id) {
         state.singleNotifiedId = job.id;
         notify('MinusMix FeedPak created', result.filename, 'ok');
@@ -366,14 +507,14 @@
 
   function pollSingleExport() {
     if (!state.singleJobId) return;
-    jsonFetch('/export/' + encodeURIComponent(state.singleJobId)).then(renderSingleJob).catch(function (error) {
+    apiClient.exportStatus(state.singleJobId).then(renderSingleJob).catch(function (error) {
       showStatus('error', 'Could not refresh export status: ' + error.message);
       scheduleSinglePoll(2500);
     });
   }
 
   function loadLatestSingleExport() {
-    jsonFetch('/export/latest').then(function (data) {
+    apiClient.latestExport().then(function (data) {
       if (data.job) renderSingleJob(data.job);
     }).catch(function () {});
   }
@@ -382,9 +523,7 @@
     if (!state.singleJobId || !state.busy) return;
     if ($('pmx-single-cancel')) $('pmx-single-cancel').disabled = true;
     showStatus('info', 'Cancel requested. The current operation is stopping safely…');
-    jsonFetch('/export/' + encodeURIComponent(state.singleJobId) + '/cancel', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
-    }).then(renderSingleJob).catch(function (error) {
+    apiClient.cancelExport(state.singleJobId).then(renderSingleJob).catch(function (error) {
       showStatus('error', error.message);
       if ($('pmx-single-cancel')) $('pmx-single-cancel').disabled = false;
     });
@@ -397,12 +536,15 @@
     if ($('pmx-mode-single')) {
       $('pmx-mode-single').classList.toggle('active', !batch);
       $('pmx-mode-single').setAttribute('aria-selected', batch ? 'false' : 'true');
+      $('pmx-mode-single').setAttribute('tabindex', batch ? '-1' : '0');
     }
     if ($('pmx-mode-batch')) {
       $('pmx-mode-batch').classList.toggle('active', batch);
       $('pmx-mode-batch').setAttribute('aria-selected', batch ? 'true' : 'false');
+      $('pmx-mode-batch').setAttribute('tabindex', batch ? '0' : '-1');
     }
     try { localStorage.setItem(STORAGE_MODE, batch ? 'batch' : 'single'); } catch (_) {}
+    renderEngineStatus();
   }
 
   function showBatchStatus(kind, text) {
@@ -420,6 +562,7 @@
       recursive: !!($('pmx-batch-recursive') && $('pmx-batch-recursive').checked),
       skip_existing: !!($('pmx-batch-skip-existing') && $('pmx-batch-skip-existing').checked),
       skip_derived: !!($('pmx-batch-skip-derived') && $('pmx-batch-skip-derived').checked),
+      preserve_structure: batchPreservesStructure(),
     };
   }
 
@@ -432,7 +575,16 @@
     updateBatchReady();
   }
 
+  function updateBatchLayoutHelp() {
+    var help = $('pmx-batch-layout-help');
+    if (!help) return;
+    help.textContent = batchPreservesStructure()
+      ? 'Source subfolders will be recreated below the output folder. Sources are read-only and existing output files are never overwritten.'
+      : 'Flat output is selected. Name collisions receive a numbered filename. Sources are read-only and existing output files are never overwritten.';
+  }
+
   function updateBatchReady() {
+    renderEngineStatus();
     var options = batchOptions();
     var hasBasics = !!options.input_dir && !!options.output_dir && options.excluded_stems.length > 0;
     var currentScan = state.batchScan && state.batchScanKey === batchOptionsKey();
@@ -445,7 +597,8 @@
         || !state.ffmpegAvailable || !engineOkay;
     }
     ['pmx-batch-input-browse', 'pmx-batch-output-browse', 'pmx-batch-recursive',
-      'pmx-batch-skip-existing', 'pmx-batch-skip-derived'].forEach(function (id) {
+      'pmx-batch-skip-existing', 'pmx-batch-skip-derived',
+      'pmx-batch-layout-flat', 'pmx-batch-layout-preserve'].forEach(function (id) {
       if ($(id)) $(id).disabled = state.busy || state.batchBusy || state.batchActive;
     });
     Array.prototype.forEach.call(document.querySelectorAll('#pmx-batch-stems input'), function (input) {
@@ -619,7 +772,7 @@
         $('pmx-batch-current').textContent += ' Showing the first ' + (scan.items || []).length + ' results.';
       }
     }
-    if ($('pmx-batch-progress-bar')) $('pmx-batch-progress-bar').value = 0;
+    if ($('pmx-batch-progress-bar')) $('pmx-batch-progress-bar').value = 1;
     var counts = scan.counts || {};
     if ($('pmx-batch-counts')) {
       $('pmx-batch-counts').innerHTML = '<span>' + (counts.ready || 0) + ' ready</span>'
@@ -642,22 +795,67 @@
     var optionsKey = JSON.stringify(options);
     updateBatchReady();
     showBatchStatus('info', 'Scanning feedpaks and checking which stems are already available…');
-    jsonFetch('/batch/scan', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(options),
-    }).then(function (scan) {
-      if (batchOptionsKey() !== optionsKey) {
-        showBatchStatus('info', 'Folder options changed while scanning. Scan again for an up-to-date preview.');
-        return;
-      }
-      renderBatchScan(scan, optionsKey);
-      showBatchStatus('ok', 'Scan complete. Sources remain untouched.');
+    state.batchScanRequestKey = optionsKey;
+    apiClient.startScan(options).then(function (job) {
+      state.batchScanJobId = job.id || '';
+      renderBatchScanJob(job);
     }).catch(function (error) {
       showBatchStatus('error', error.message);
-    }).finally(function () {
       state.batchBusy = false;
       updateBatchReady();
     });
+  }
+
+  function renderBatchScanJob(job) {
+    if (!job) return;
+    state.batchScanJobId = job.id || state.batchScanJobId;
+    var active = ['queued', 'running', 'canceling'].indexOf(job.status) >= 0;
+    state.batchBusy = active;
+    if ($('pmx-batch-progress')) $('pmx-batch-progress').hidden = false;
+    setNodeText($('pmx-batch-progress-title'), active ? 'Scanning folder'
+      : job.status === 'completed' ? 'Scan complete'
+        : job.status === 'canceled' ? 'Scan canceled' : 'Scan stopped');
+    setNodeText($('pmx-batch-current'), job.detail || 'Reading FeedPak manifests');
+    if ($('pmx-batch-progress-bar')) {
+      $('pmx-batch-progress-bar').value = Number(job.progress || 0);
+    }
+    setNodeHtml($('pmx-batch-counts'), active ? '<span>Sources remain read-only</span>' : '');
+    if ($('pmx-batch-cancel')) {
+      $('pmx-batch-cancel').disabled = !active || job.status === 'canceling';
+    }
+    if ($('pmx-batch-refresh')) $('pmx-batch-refresh').disabled = active;
+    updateBatchReady();
+
+    if (active) {
+      scheduleBatchScanPoll(500);
+      return;
+    }
+    clearTimeout(state.batchScanPollTimer);
+    state.batchScanPollTimer = null;
+    state.batchScanJobId = '';
+    if (job.status === 'completed' && job.result) {
+      if (batchOptionsKey() === state.batchScanRequestKey) {
+        renderBatchScan(job.result, state.batchScanRequestKey);
+        showBatchStatus('ok', 'Scan complete. Sources remain untouched.');
+      } else {
+        showBatchStatus('info', 'Folder options changed while scanning. Scan again for an up-to-date preview.');
+      }
+    } else if (job.status === 'canceled') {
+      showBatchStatus('info', 'Folder scan canceled. No source files were changed.');
+    } else {
+      showBatchStatus('error', job.detail || 'Folder scan failed.');
+    }
+    updateBatchReady();
+  }
+
+  function pollBatchScan() {
+    if (!state.batchScanJobId) return;
+    apiClient.scanStatus(state.batchScanJobId)
+      .then(renderBatchScanJob)
+      .catch(function (error) {
+        showBatchStatus('error', 'Could not refresh folder scan: ' + error.message);
+        scheduleBatchScanPoll(2000);
+      });
   }
 
   function renderBatchJob(job) {
@@ -688,7 +886,9 @@
       + '<span>' + (counts.queued || 0) + ' waiting</span>'
       + '<span>' + (counts.skipped || 0) + ' skipped</span>'
       + '<span>' + (counts.failed || 0) + ' failed</span>'
-      + '<span>' + (counts.duplicate_audio_reused || 0) + ' duplicate splits reused</span>');
+      + '<span>' + (counts.duplicate_audio_reused || 0) + ' duplicate splits reused</span>'
+      + ((counts.preview_failures || 0)
+        ? '<span>' + counts.preview_failures + ' without preview</span>' : ''));
     if ($('pmx-batch-cancel')) $('pmx-batch-cancel').disabled = !active || job.status === 'canceling';
     if ($('pmx-batch-refresh')) $('pmx-batch-refresh').disabled = false;
     renderBatchItems(job.items, false, 'job:' + (job.id || 'latest'));
@@ -724,7 +924,7 @@
     if (!state.batchJobId || state.batchPollLoading) return;
     state.batchPollLoading = true;
     if ($('pmx-batch-refresh')) $('pmx-batch-refresh').disabled = true;
-    jsonFetch('/batch/' + encodeURIComponent(state.batchJobId)).then(renderBatchJob).catch(function (error) {
+    apiClient.batchStatus(state.batchJobId).then(renderBatchJob).catch(function (error) {
       state.batchPollFailures += 1;
       var delay = Math.min(POLL_RETRY_MAX_MS,
         2500 * Math.pow(2, Math.min(state.batchPollFailures - 1, 3)));
@@ -739,7 +939,7 @@
   }
 
   function loadLatestBatch() {
-    jsonFetch('/batch/latest').then(function (data) {
+    apiClient.latestBatch().then(function (data) {
       if (data.job) {
         if (['queued', 'running', 'canceling'].indexOf(data.job.status) < 0) {
           state.batchNotifiedId = data.job.id;
@@ -757,10 +957,9 @@
     state.batchBusy = true;
     updateBatchReady();
     showBatchStatus('info', 'Starting sequential conversion. Processing one song at a time for GPU stability…');
-    jsonFetch('/batch/start', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(batchOptions()),
-    }).then(function (job) {
+    var options = batchOptions();
+    options.scan_id = state.batchScan.scan_id || '';
+    apiClient.startBatch(options).then(function (job) {
       state.batchNotifiedId = '';
       renderBatchJob(job);
     }).catch(function (error) {
@@ -772,12 +971,19 @@
   }
 
   function cancelBatch() {
+    if (state.batchBusy && state.batchScanJobId) {
+      $('pmx-batch-cancel').disabled = true;
+      showBatchStatus('info', 'Canceling folder scan safelyâ€¦');
+      apiClient.cancelScan(state.batchScanJobId).then(renderBatchScanJob).catch(function (error) {
+        showBatchStatus('error', error.message);
+        $('pmx-batch-cancel').disabled = false;
+      });
+      return;
+    }
     if (!state.batchJobId || !state.batchActive) return;
     $('pmx-batch-cancel').disabled = true;
     showBatchStatus('info', 'Cancel requested. The current operation will stop at a safe checkpoint…');
-    jsonFetch('/batch/' + encodeURIComponent(state.batchJobId) + '/cancel', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
-    }).then(renderBatchJob).catch(function (error) {
+    apiClient.cancelBatch(state.batchJobId).then(renderBatchJob).catch(function (error) {
       showBatchStatus('error', error.message);
       $('pmx-batch-cancel').disabled = false;
     });
@@ -792,10 +998,10 @@
     showStatus('info', selectionNeedsSeparation(stems)
       ? 'Separating ' + stems.map(labelFor).join(' + ') + ' temporarily, then creating the single-stem feedpak. This can take several minutes…'
       : 'Rendering audio and packaging a new feedpak…');
-    jsonFetch('/export', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ filename: state.selectedFilename, excluded_stems: stems, output_dir: outputFolder() }),
+    apiClient.startExport({
+      filename: state.selectedFilename,
+      excluded_stems: stems,
+      output_dir: outputFolder(),
     }).then(function (job) {
       state.singleNotifiedId = '';
       renderSingleJob(job);
@@ -813,7 +1019,7 @@
     if (state.statusLoading) return Promise.resolve();
     state.statusLoading = true;
     if ($('pmx-engine-refresh')) $('pmx-engine-refresh').disabled = true;
-    return jsonFetch('/status').then(function (status) {
+    return apiClient.status().then(function (status) {
       state.ffmpegAvailable = !!status.ffmpeg_available;
       state.separation = status.separation || state.separation;
       renderEngineStatus();
@@ -841,14 +1047,21 @@
     if (!root) return;
     state.inited = true;
     var saved = '';
-    var batchInput = '', batchOutput = '', savedMode = 'single';
+    var batchInput = '', batchOutput = '', batchLayout = 'preserve', savedMode = 'single';
     saved = storedValue(STORAGE_OUTPUT, '');
     batchInput = storedValue(STORAGE_BATCH_INPUT, '');
     batchOutput = storedValue(STORAGE_BATCH_OUTPUT, '');
+    batchLayout = storedValue(STORAGE_BATCH_LAYOUT, 'preserve');
     savedMode = storedValue(STORAGE_MODE, 'single');
     if ($('pmx-output')) $('pmx-output').value = saved;
     if ($('pmx-batch-input')) $('pmx-batch-input').value = batchInput;
     if ($('pmx-batch-output')) $('pmx-batch-output').value = batchOutput;
+    if (batchLayout === 'flat' && $('pmx-batch-layout-flat')) {
+      $('pmx-batch-layout-flat').checked = true;
+    } else if ($('pmx-batch-layout-preserve')) {
+      $('pmx-batch-layout-preserve').checked = true;
+    }
+    updateBatchLayoutHelp();
     setMode(savedMode === 'batch' ? 'batch' : 'single');
     $('pmx-source').addEventListener('change', function () { chooseSource(this.value); });
     $('pmx-refresh').addEventListener('click', function () { loadSources(); refreshStatus(); });
@@ -858,6 +1071,16 @@
     $('pmx-single-cancel').addEventListener('click', cancelSingleExport);
     $('pmx-mode-single').addEventListener('click', function () { setMode('single'); });
     $('pmx-mode-batch').addEventListener('click', function () { setMode('batch'); });
+    document.querySelector('.pmx-tabs').addEventListener('keydown', function (event) {
+      var tabs = [$('pmx-mode-single'), $('pmx-mode-batch')];
+      var current = tabs.indexOf(document.activeElement);
+      if (current < 0) return;
+      var next = nextTabIndex(current, event.key, tabs.length);
+      if (next === null) return;
+      event.preventDefault();
+      setMode(next === 1 ? 'batch' : 'single');
+      tabs[next].focus();
+    });
     $('pmx-batch-input-browse').addEventListener('click', function () {
       browseBatchFolder('pmx-batch-input', STORAGE_BATCH_INPUT);
     });
@@ -873,6 +1096,14 @@
     });
     ['pmx-batch-recursive', 'pmx-batch-skip-existing', 'pmx-batch-skip-derived'].forEach(function (id) {
       $(id).addEventListener('change', invalidateBatchScan);
+    });
+    ['pmx-batch-layout-flat', 'pmx-batch-layout-preserve'].forEach(function (id) {
+      $(id).addEventListener('change', function () {
+        if (!this.checked) return;
+        try { localStorage.setItem(STORAGE_BATCH_LAYOUT, this.value); } catch (_) {}
+        updateBatchLayoutHelp();
+        invalidateBatchScan();
+      });
     });
     Array.prototype.forEach.call(document.querySelectorAll('#pmx-batch-stems input'), function (input) {
       input.addEventListener('change', invalidateBatchScan);
@@ -903,6 +1134,7 @@
         refreshStatus();
         loadLatestSingleExport();
         loadLatestBatch();
+        if (state.batchBusy && state.batchScanJobId) pollBatchScan();
       }, 0);
     } else {
       pauseScreenPolling();
@@ -917,6 +1149,7 @@
     refreshStatus();
     loadLatestSingleExport();
     loadLatestBatch();
+    if (state.batchBusy && state.batchScanJobId) pollBatchScan();
   }
 
   function boot() {
@@ -935,4 +1168,4 @@
       if ((fb && fb.on) || tries++ > 50) { clearInterval(timer); boot(); }
     }, 100);
   }
-})();
+})(typeof window !== 'undefined' ? window : globalThis);

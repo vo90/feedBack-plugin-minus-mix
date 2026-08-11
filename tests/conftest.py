@@ -14,13 +14,12 @@ from pathlib import Path
 
 import yaml
 
-
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PLUGIN_ROOT))
 
 
 try:
-    import audio  # noqa: F401
+    import audio
 except ImportError:
     audio = types.ModuleType("audio")
     audio._ffmpeg_cmd = lambda: shutil.which("ffmpeg")
@@ -35,7 +34,7 @@ except ImportError:
 
 
 try:
-    import sloppak  # noqa: F401
+    import sloppak
 except ImportError:
     sloppak = types.ModuleType("sloppak")
 

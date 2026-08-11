@@ -5,6 +5,7 @@ import array
 import hashlib
 import json
 import math
+import multiprocessing
 import subprocess
 import sys
 import time
@@ -13,16 +14,15 @@ from pathlib import Path
 
 import pytest
 import yaml
-
 from audio import _ffmpeg_cmd
-import exporter
 
+import exporter
+from tests.publish_worker import publish_worker
 
 FFMPEG = _ffmpeg_cmd()
 
-
 def _run(args: list[str]) -> None:
-    result = subprocess.run(args, capture_output=True)
+    result = subprocess.run(args, capture_output=True, check=False)
     assert result.returncode == 0, result.stderr.decode("utf-8", "replace")[-1000:]
 
 
@@ -88,7 +88,7 @@ def _tone_amplitude(audio: Path, frequency: float) -> float:
     result = subprocess.run([
         FFMPEG, "-hide_banner", "-loglevel", "error", "-i", str(audio),
         "-f", "f32le", "-ac", "1", "-ar", "44100", "-",
-    ], capture_output=True)
+    ], capture_output=True, check=False)
     assert result.returncode == 0, result.stderr.decode("utf-8", "replace")
     samples = array.array("f")
     samples.frombytes(result.stdout)
@@ -99,6 +99,78 @@ def _tone_amplitude(audio: Path, frequency: float) -> float:
     re = sum(sample * math.cos(omega * i) for i, sample in enumerate(samples))
     im = sum(sample * math.sin(omega * i) for i, sample in enumerate(samples))
     return 2.0 * math.hypot(re, im) / len(samples)
+
+
+def test_atomic_publish_retries_if_first_output_appears_during_publication(
+        tmp_path, monkeypatch):
+    output_dir = tmp_path / "exports"
+    output_dir.mkdir()
+    source = tmp_path / "Artist - Song.feedpak"
+    output_tmp = output_dir / ".complete.tmp"
+    output_tmp.write_bytes(b"complete archive")
+    desired = exporter.desired_output_path(
+        output_dir, source, suffix="No Guitar",
+    )
+    real_link = exporter.os.link
+    raced = False
+
+    def racing_link(source_path, destination_path):
+        nonlocal raced
+        if not raced:
+            raced = True
+            Path(destination_path).write_bytes(b"another process")
+            raise FileExistsError("destination appeared during publication")
+        return real_link(source_path, destination_path)
+
+    monkeypatch.setattr(exporter.os, "link", racing_link)
+
+    published = exporter._publish_unique_output(
+        output_tmp, output_dir, source, "No Guitar",
+    )
+
+    assert desired.read_bytes() == b"another process"
+    assert published.name == "Artist - Song (No Guitar) (2).feedpak"
+    assert published.read_bytes() == b"complete archive"
+    assert not output_tmp.exists()
+
+
+def test_atomic_publish_is_no_replace_across_processes(tmp_path):
+    output_dir = tmp_path / "exports"
+    output_dir.mkdir()
+    source = tmp_path / "Artist - Song.feedpak"
+    first_tmp = output_dir / ".first.tmp"
+    second_tmp = output_dir / ".second.tmp"
+    first_tmp.write_bytes(b"first complete archive")
+    second_tmp.write_bytes(b"second complete archive")
+    context = multiprocessing.get_context("spawn")
+    ready = context.Queue()
+    start = context.Event()
+    results = context.Queue()
+    workers = [
+        context.Process(
+            target=publish_worker,
+            args=(str(temp), str(output_dir), str(source), ready, start, results),
+        )
+        for temp in (first_tmp, second_tmp)
+    ]
+    for worker in workers:
+        worker.start()
+    assert ready.get(timeout=10) is True
+    assert ready.get(timeout=10) is True
+    start.set()
+    for worker in workers:
+        worker.join(timeout=15)
+        assert worker.exitcode == 0
+
+    published = [results.get(timeout=5) for _worker in workers]
+    assert all(error is None for _name, _content, error in published)
+    assert {name for name, _content, _error in published} == {
+        "Artist - Song (No Guitar).feedpak",
+        "Artist - Song (No Guitar) (2).feedpak",
+    }
+    assert {content for _name, content, _error in published} == {
+        "first complete archive", "second complete archive",
+    }
 
 
 @pytest.mark.skipif(not FFMPEG, reason="ffmpeg is required for a real-audio export")
@@ -136,17 +208,43 @@ def test_export_removes_selected_audio_preserves_assets_and_never_mutates_source
         assert manifest["stem_separation"]["model"] == "bs_roformer_sw"
         rendered = tmp_path / "rendered.ogg"
         rendered.write_bytes(zf.read("stems/full.ogg"))
+        rendered_preview = tmp_path / "rendered-preview.ogg"
+        rendered_preview.write_bytes(zf.read("preview.ogg"))
 
     low = _tone_amplitude(rendered, 110)
     high = _tone_amplitude(rendered, 440)
     assert low > 0.05
     assert high < low / 8.0
+    preview_low = _tone_amplitude(rendered_preview, 110)
+    preview_high = _tone_amplitude(rendered_preview, 440)
+    assert preview_low > 0.01
+    assert preview_high < preview_low / 6.0
 
     # A second export chooses a new name; it never asks whether overwriting is OK.
     second = exporter.export_minus_mix(source, out_dir, ["guitar"])
     assert second.output_filename == "Test Artist - Test Song (No Guitar) (2).feedpak"
     assert result.output_path.is_file() and second.output_path.is_file()
     assert _sha256(source) == source_hash
+
+
+@pytest.mark.skipif(not FFMPEG, reason="ffmpeg is required for a real-audio export")
+def test_export_parses_manifest_once(tmp_path, monkeypatch):
+    source = _make_source(tmp_path)
+    out_dir = tmp_path / "exports"
+    out_dir.mkdir()
+    real_manifest = exporter._manifest
+    calls = 0
+
+    def counted_manifest(path):
+        nonlocal calls
+        calls += 1
+        return real_manifest(path)
+
+    monkeypatch.setattr(exporter, "_manifest", counted_manifest)
+    result = exporter.export_minus_mix(source, out_dir, ["guitar"])
+
+    assert result.output_path.is_file()
+    assert calls == 1
 
 
 @pytest.mark.skipif(not FFMPEG, reason="ffmpeg is required for a real-audio export")
@@ -157,19 +255,23 @@ def test_single_stem_source_uses_temporary_separator_and_discards_its_outputs(tm
     out_dir.mkdir()
     temporary_dirs: list[Path] = []
 
-    def separate(full_mix: Path, separation_dir: Path, requested: tuple[str, ...]):
-        assert full_mix.is_file()
-        assert requested == ("guitar",)
-        temporary_dirs.append(separation_dir)
-        guitar = separation_dir / "guitar.ogg"
-        _ogg_sine(guitar, 440)
-        # A six-stem engine may also return files the exporter did not request.
-        other = separation_dir / "drums.ogg"
-        _ogg_sine(other, 220)
-        return {"guitar": guitar, "drums": other}
+    class TemporaryProvider:
+        @staticmethod
+        def obtain(full_mix: Path, separation_dir: Path,
+                   requested: tuple[str, ...], full_digest: str | None):
+            assert full_mix.is_file()
+            assert requested == ("guitar",)
+            assert full_digest == _sha256(full_mix)
+            temporary_dirs.append(separation_dir)
+            guitar = separation_dir / "guitar.ogg"
+            _ogg_sine(guitar, 440)
+            # A six-stem engine may also return files the exporter did not request.
+            other = separation_dir / "drums.ogg"
+            _ogg_sine(other, 220)
+            return {"guitar": guitar, "drums": other}
 
     result = exporter.export_minus_mix(
-        source, out_dir, ["guitar"], separate_missing=separate,
+        source, out_dir, ["guitar"], stem_provider=TemporaryProvider(),
     )
 
     assert result.temporary_separation_used is True

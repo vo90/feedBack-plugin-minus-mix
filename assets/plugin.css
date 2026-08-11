@@ -29,6 +29,7 @@
 .practice-mix-exporter .pmx-engine-dot { width: .55rem; height: .55rem; border-radius: 50%; background: #94a3b8; }
 .practice-mix-exporter .pmx-engine.ready .pmx-engine-dot { background: #4ade80; box-shadow: 0 0 0 3px rgba(74,222,128,.12); }
 .practice-mix-exporter .pmx-engine.not-ready .pmx-engine-dot { background: #facc15; box-shadow: 0 0 0 3px rgba(250,204,21,.1); }
+.practice-mix-exporter .pmx-engine.not-needed .pmx-engine-dot { background: #94a3b8; box-shadow: none; }
 .practice-mix-exporter .pmx-engine-refresh {
   margin-left: auto; border: 0; padding: .25rem .5rem; border-radius: 6px;
   color: #bfdbfe; background: rgba(37,99,235,.18); font: inherit;
@@ -46,6 +47,12 @@
   background: transparent; font: inherit; font-weight: 750; cursor: pointer;
 }
 .practice-mix-exporter .pmx-tab.active { color: #dbeafe; background: rgba(37,99,235,.3); }
+.practice-mix-exporter .pmx-tab:focus-visible,
+.practice-mix-exporter .pmx-button:focus-visible,
+.practice-mix-exporter .pmx-engine-refresh:focus-visible,
+.practice-mix-exporter summary:focus-visible {
+  outline: 2px solid #60a5fa; outline-offset: 2px;
+}
 .practice-mix-exporter .pmx-batch-intro { margin: 0 0 .85rem; }
 .practice-mix-exporter .pmx-batch-intro h2 { margin: 0; font-size: 1.15rem; }
 .practice-mix-exporter .pmx-batch-intro p { color: #94a3b8; }
@@ -94,6 +101,13 @@
   color: #cbd5e1; font-size: .82rem; font-weight: 600;
 }
 .practice-mix-exporter .pmx-option input { width: auto; margin: 0; padding: 0; border: 0; accent-color: #3b82f6; }
+.practice-mix-exporter .pmx-layout-options { margin: .8rem 0 0; padding: 0; border: 0; }
+.practice-mix-exporter .pmx-layout-options legend { color: #cbd5e1; font-size: .82rem; font-weight: 700; }
+.practice-mix-exporter .pmx-layout-options .pmx-option { display: flex; margin-top: .4rem; }
+.practice-mix-exporter .pmx-stem-options { margin: 0; padding: 0; border: 0; }
+.practice-mix-exporter .pmx-stem-options legend { margin-bottom: .45rem; font-weight: 700; }
+.practice-mix-exporter .pmx-advanced { margin-top: .8rem; color: #94a3b8; font-size: .82rem; }
+.practice-mix-exporter .pmx-advanced summary { width: fit-content; color: #cbd5e1; cursor: pointer; font-weight: 650; }
 .practice-mix-exporter .pmx-stems { display: flex; flex-wrap: wrap; gap: .5rem; min-height: 2rem; }
 .practice-mix-exporter .pmx-stem {
   display: inline-flex; align-items: center; gap: .45rem; margin: 0; padding: .45rem .65rem;

@@ -9,11 +9,37 @@ from __future__ import annotations
 import copy
 import threading
 import uuid
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
-
+from typing import TypedDict
 
 ACTIVE_STATUSES = {"queued", "running", "canceling"}
+
+
+class SingleExportResult(TypedDict, total=False):
+    filename: str
+    path: str
+    title: str
+    excluded_stems: list[str]
+    preview_created: bool
+    temporary_separation_used: bool
+    source_unchanged: bool
+
+
+class SingleJob(TypedDict, total=False):
+    id: str
+    status: str
+    created_at: str
+    completed_at: str | None
+    source_filename: str
+    source_title: str
+    output_dir: str
+    excluded_stems: list[str]
+    stage: str
+    progress: float
+    detail: str
+    result: SingleExportResult | None
 
 
 class SingleExportError(RuntimeError):
@@ -28,6 +54,25 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+class SeparatorStemProvider:
+    """Adapt the server client to the exporter's stem-provider boundary."""
+
+    def __init__(self, separator, checkpoint: Callable[[], None],
+                 progress: Callable[[float, str], None]):
+        self.separator = separator
+        self.checkpoint = checkpoint
+        self.progress = progress
+
+    def obtain(self, mix: Path, work: Path, stems: tuple[str, ...],
+               full_digest: str | None) -> dict[str, Path]:
+        del full_digest  # Single exports do not need the batch duplicate cache.
+        self.checkpoint()
+        return self.separator.separate(
+            mix, work, stems,
+            progress_cb=self.progress, cancel_cb=self.checkpoint,
+        )
+
+
 class SingleExportManager:
     """Run at most one single-song export at a time per app process."""
 
@@ -36,7 +81,7 @@ class SingleExportManager:
         self.separator = separator
         self.log = log
         self.lock = threading.RLock()
-        self.jobs: dict[str, dict] = {}
+        self.jobs: dict[str, SingleJob] = {}
         self.cancel_events: dict[str, threading.Event] = {}
         self.active_id: str | None = None
 
@@ -75,7 +120,9 @@ class SingleExportManager:
 
         source = Path(source).resolve()
         output_dir = Path(output_dir).resolve()
-        info = self.exporter.inspect_source(source)
+        prepare = getattr(self.exporter, "prepare_source", None)
+        prepared_source = prepare(source) if callable(prepare) else None
+        info = prepared_source.info if prepared_source is not None else self.exporter.inspect_source(source)
         job_id = uuid.uuid4().hex
         job = {
             "id": job_id,
@@ -108,7 +155,7 @@ class SingleExportManager:
 
         thread = threading.Thread(
             target=self._run,
-            args=(job_id, source, output_dir, tuple(selected)),
+            args=(job_id, source, output_dir, tuple(selected), prepared_source),
             name=f"minus-mix-single-{job_id[:8]}",
             daemon=True,
         )
@@ -149,7 +196,7 @@ class SingleExportManager:
             job["detail"] = str(detail or "")[:500]
 
     def _run(self, job_id: str, source: Path, output_dir: Path,
-             selected: tuple[str, ...]) -> None:
+             selected: tuple[str, ...], prepared_source=None) -> None:
         with self.lock:
             job = self.jobs[job_id]
             event = self.cancel_events[job_id]
@@ -167,33 +214,27 @@ class SingleExportManager:
             checkpoint()
             self._update(job_id, stage=stage, progress=fraction, detail=detail)
 
-        def separate_missing(mix: Path, work: Path,
-                             stems: tuple[str, ...]) -> dict[str, Path]:
+        def separation_progress(value, message) -> None:
             checkpoint()
-            status = self.separator.status()
-            if not status.get("ready"):
-                raise SingleExportError(str(
-                    status.get("reason") or "Stem Splitter server unavailable"
-                ))
-
-            def separation_progress(value, message) -> None:
-                checkpoint()
-                mapped = 0.08 + max(0.0, min(1.0, float(value))) * 0.66
-                self._update(
-                    job_id, stage="separating", progress=mapped,
-                    detail=str(message or "Separating audio"),
-                )
-
-            return self.separator.separate(
-                mix, work, stems,
-                progress_cb=separation_progress, cancel_cb=checkpoint,
+            mapped = 0.08 + max(0.0, min(1.0, float(value))) * 0.66
+            self._update(
+                job_id, stage="separating", progress=mapped,
+                detail=str(message or "Separating audio"),
             )
 
+        stem_provider = SeparatorStemProvider(
+            self.separator, checkpoint, separation_progress,
+        )
+
         try:
+            export_options = {
+                "stem_provider": stem_provider,
+                "progress_cb": progress, "cancel_cb": checkpoint, "log": self.log,
+            }
+            if prepared_source is not None:
+                export_options["prepared_source"] = prepared_source
             result = self.exporter.export_minus_mix(
-                source, output_dir, selected,
-                separate_missing=separate_missing,
-                progress_cb=progress, cancel_cb=checkpoint, log=self.log,
+                source, output_dir, selected, **export_options,
             )
             # Once export_minus_mix returns, its atomic rename has completed.
             # A late cancel must not claim that the already-created file vanished.

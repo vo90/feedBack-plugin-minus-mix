@@ -15,11 +15,11 @@
   </div>
 
   <div class="pmx-tabs" role="tablist" aria-label="Export mode">
-    <button id="pmx-mode-single" class="pmx-tab active" type="button" role="tab" aria-selected="true">Single song</button>
-    <button id="pmx-mode-batch" class="pmx-tab" type="button" role="tab" aria-selected="false">Batch folder</button>
+    <button id="pmx-mode-single" class="pmx-tab active" type="button" role="tab" aria-selected="true" aria-controls="pmx-single-panel" tabindex="0">Single song</button>
+    <button id="pmx-mode-batch" class="pmx-tab" type="button" role="tab" aria-selected="false" aria-controls="pmx-batch-panel" tabindex="-1">Batch folder</button>
   </div>
 
-  <div id="pmx-single-panel" role="tabpanel">
+  <div id="pmx-single-panel" role="tabpanel" aria-labelledby="pmx-mode-single">
 
   <section class="pmx-card">
     <div class="pmx-step">1</div>
@@ -38,10 +38,12 @@
   <section class="pmx-card">
     <div class="pmx-step">2</div>
     <div class="pmx-content">
-      <label>Audio to exclude</label>
-      <div id="pmx-stems" class="pmx-stems">
-        <p class="pmx-help">Choose a split song first.</p>
-      </div>
+      <fieldset class="pmx-stem-options">
+        <legend>Audio to exclude</legend>
+        <div id="pmx-stems" class="pmx-stems">
+          <p class="pmx-help">Choose a split song first.</p>
+        </div>
+      </fieldset>
       <p class="pmx-help">
         This selects audio stems, not notation arrangements. Excluding Guitar removes the model's combined guitar audio;
         lead and rhythm charts remain available to play.
@@ -79,14 +81,14 @@
       </div>
       <button id="pmx-single-cancel" class="pmx-button pmx-danger" type="button">Cancel safely</button>
     </div>
-    <progress id="pmx-single-progress-bar" max="1" value="0"></progress>
+    <progress id="pmx-single-progress-bar" max="1" value="0" aria-labelledby="pmx-single-progress-title pmx-single-current"></progress>
   </section>
   </div>
 
-  <div id="pmx-batch-panel" role="tabpanel" hidden>
+  <div id="pmx-batch-panel" role="tabpanel" aria-labelledby="pmx-mode-batch" hidden>
     <section class="pmx-batch-intro">
       <h2>Batch folder conversion</h2>
-      <p>Recursively scan a folder and create compact MinusMix FeedPaks in a separate output tree. Processing is sequential for GPU stability; one bad file does not stop the queue.</p>
+      <p>Scan a folder and create compact MinusMix FeedPaks in a separate output folder. Processing is sequential for GPU stability; one bad file does not stop the queue.</p>
     </section>
 
     <section class="pmx-card">
@@ -109,26 +111,36 @@
           <input id="pmx-batch-output" type="text" readonly placeholder="Choose a different output folder">
           <button id="pmx-batch-output-browse" class="pmx-button pmx-secondary" type="button">Choose folder…</button>
         </div>
-        <p class="pmx-help">Subfolders are preserved. Sources are read-only and existing output files are never overwritten.</p>
+        <fieldset class="pmx-layout-options">
+          <legend>Output structure</legend>
+          <label class="pmx-option"><input id="pmx-batch-layout-preserve" type="radio" name="pmx-batch-layout" value="preserve" checked> Preserve source subfolders inside the output folder</label>
+          <label class="pmx-option"><input id="pmx-batch-layout-flat" type="radio" name="pmx-batch-layout" value="flat"> Put every FeedPak directly in the output folder</label>
+        </fieldset>
+        <p id="pmx-batch-layout-help" class="pmx-help">Source subfolders will be recreated below the output folder. Sources are read-only and existing output files are never overwritten.</p>
       </div>
     </section>
 
     <section class="pmx-card">
       <div class="pmx-step">3</div>
       <div class="pmx-content">
-        <label>Audio to exclude from every song</label>
-        <div id="pmx-batch-stems" class="pmx-stems">
-          <label class="pmx-stem"><input type="checkbox" value="guitar" checked><span>Guitar</span></label>
-          <label class="pmx-stem"><input type="checkbox" value="bass"><span>Bass</span></label>
-          <label class="pmx-stem"><input type="checkbox" value="drums"><span>Drums</span></label>
-          <label class="pmx-stem"><input type="checkbox" value="vocals"><span>Vocals</span></label>
-          <label class="pmx-stem"><input type="checkbox" value="piano"><span>Piano</span></label>
-          <label class="pmx-stem"><input type="checkbox" value="other"><span>Other</span></label>
-        </div>
-        <div class="pmx-options">
-          <label class="pmx-option"><input id="pmx-batch-skip-existing" type="checkbox" checked> Skip outputs already created</label>
-          <label class="pmx-option"><input id="pmx-batch-skip-derived" type="checkbox" checked> Skip songs already produced by MinusMix</label>
-        </div>
+        <fieldset class="pmx-stem-options">
+          <legend>Audio to exclude from every song</legend>
+          <div id="pmx-batch-stems" class="pmx-stems">
+            <label class="pmx-stem"><input type="checkbox" value="guitar" checked><span>Guitar</span></label>
+            <label class="pmx-stem"><input type="checkbox" value="bass"><span>Bass</span></label>
+            <label class="pmx-stem"><input type="checkbox" value="drums"><span>Drums</span></label>
+            <label class="pmx-stem"><input type="checkbox" value="vocals"><span>Vocals</span></label>
+            <label class="pmx-stem"><input type="checkbox" value="piano"><span>Piano</span></label>
+            <label class="pmx-stem"><input type="checkbox" value="other"><span>Other</span></label>
+          </div>
+        </fieldset>
+        <details class="pmx-advanced">
+          <summary>Advanced skip settings</summary>
+          <div class="pmx-options">
+            <label class="pmx-option"><input id="pmx-batch-skip-existing" type="checkbox" checked> Skip outputs already created</label>
+            <label class="pmx-option"><input id="pmx-batch-skip-derived" type="checkbox" checked> Skip songs already produced by MinusMix</label>
+          </div>
+        </details>
       </div>
     </section>
 
@@ -156,7 +168,7 @@
           <button id="pmx-batch-cancel" class="pmx-button pmx-danger" type="button">Cancel safely</button>
         </div>
       </div>
-      <progress id="pmx-batch-progress-bar" max="1" value="0"></progress>
+      <progress id="pmx-batch-progress-bar" max="1" value="0" aria-labelledby="pmx-batch-progress-title pmx-batch-current"></progress>
       <div id="pmx-batch-counts" class="pmx-counts"></div>
       <p id="pmx-batch-updated" class="pmx-batch-updated" aria-live="off"></p>
       <p id="pmx-batch-items-note" class="pmx-help" hidden></p>

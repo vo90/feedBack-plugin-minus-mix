@@ -1,13 +1,13 @@
 {
   "id": "minus_mix",
   "name": "MinusMix",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "description": "Create playable songs without the instrument parts you choose.",
   "script": "screen.js",
   "screen": "screen.html",
   "styles": "assets/plugin.css",
   "routes": "routes.py",
-  "category": "audio",
+  "category": "tools",
   "nav": {
     "label": "MinusMix",
     "screen": "plugin-minus_mix"
