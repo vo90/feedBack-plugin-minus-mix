@@ -10,12 +10,12 @@ from __future__ import annotations
 import json
 import mimetypes
 import re
+import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
 from urllib.parse import urljoin, urlsplit
-
 
 SUPPORTED_STEMS = ("guitar", "bass", "drums", "vocals", "piano", "other")
 DEFAULT_MODEL = "bs_roformer_sw"
@@ -27,6 +27,8 @@ BUSY_MAX_BACKOFF = 60
 MAX_REDIRECTS = 5
 REDIRECT_CODES = (301, 302, 303, 307, 308)
 MAX_ERROR_BODY = 4000
+READY_RESOLUTION_CACHE_SECONDS = 5.0
+UNREADY_RESOLUTION_CACHE_SECONDS = 1.0
 AUDIO_EXTENSIONS = (".wav", ".flac", ".mp3", ".ogg", ".opus", ".m4a")
 
 ProgressCallback = Callable[[float, str], None] | None
@@ -169,6 +171,12 @@ class SeparationClient:
         self.config_dir = Path(config_dir)
         self.log = log
         self._requests_module = requests_module
+        self._resolve_lock = threading.Lock()
+        self._resolve_cache: tuple[
+            float,
+            tuple[ServerTarget, ...],
+            tuple[ServerTarget | None, dict | None, str],
+        ] | None = None
 
     def _requests(self):
         if self._requests_module is not None:
@@ -251,24 +259,51 @@ class SeparationClient:
         accelerator = f" · {device}{' GPU' if gpu and 'GPU' not in device else ''}" if device else ""
         return True, f"{location} ready{accelerator}"
 
-    def _resolve(self) -> tuple[ServerTarget | None, dict | None, str]:
-        targets = self._targets()
-        for target in targets:
-            health = self._probe(target)
-            if health is None:
-                continue
-            ready, reason = self._ready_reason(target, health)
-            if ready:
-                return target, health, reason
-            return None, health, reason
-        return None, None, (
-            "Stem Splitter server is not running; open Stem Splitter and start the local server"
-        )
+    def _resolve(
+        self, targets: list[ServerTarget] | None = None,
+    ) -> tuple[ServerTarget | None, dict | None, str]:
+        targets = self._targets() if targets is None else targets
+        target_key = tuple(targets)
+        with self._resolve_lock:
+            now = time.monotonic()
+            if self._resolve_cache is not None:
+                expires_at, cached_key, cached_result = self._resolve_cache
+                if cached_key == target_key and now < expires_at:
+                    return cached_result
+
+            first_unready: tuple[dict, str] | None = None
+            result: tuple[ServerTarget | None, dict | None, str] | None = None
+            for target in targets:
+                health = self._probe(target)
+                if health is None:
+                    continue
+                ready, reason = self._ready_reason(target, health)
+                if ready:
+                    result = (target, health, reason)
+                    break
+                if first_unready is None:
+                    first_unready = (health, reason)
+            if result is None and first_unready is not None:
+                health, reason = first_unready
+                result = (None, health, reason)
+            if result is None:
+                result = (None, None, (
+                    "Stem Splitter server is not running; open Stem Splitter and start the local server"
+                ))
+
+            ttl = (
+                READY_RESOLUTION_CACHE_SECONDS
+                if result[0] is not None
+                else UNREADY_RESOLUTION_CACHE_SECONDS
+            )
+            self._resolve_cache = (time.monotonic() + ttl, target_key, result)
+            return result
 
     def status(self) -> dict:
-        target, health, reason = self._resolve()
+        targets = self._targets()
+        target, health, reason = self._resolve(targets)
         return {
-            "available": bool(self._targets()),
+            "available": bool(targets),
             "ready": target is not None,
             "engine": "server" if target else None,
             "reason": reason,
@@ -339,6 +374,181 @@ class SeparationClient:
                 if response is not None:
                     response.close()
 
+    def _submit(self, target: ServerTarget, mix: Path, requested: list[str],
+                progress_cb: ProgressCallback, cancel_cb: CancelCallback) -> dict:
+        content_type = mimetypes.guess_type(mix.name)[0] or {
+            ".ogg": "audio/ogg", ".opus": "audio/opus", ".wav": "audio/wav",
+            ".flac": "audio/flac", ".mp3": "audio/mpeg", ".m4a": "audio/mp4",
+        }.get(mix.suffix.lower(), "application/octet-stream")
+        headers = {"X-API-Key": target.api_key} if target.api_key else None
+        params = {"model": target.model, "stems": ",".join(requested)}
+        requests = self._requests()
+        response = None
+        for attempt in range(BUSY_RETRIES):
+            if cancel_cb:
+                cancel_cb()
+            if progress_cb:
+                progress_cb(0.08, "Uploading the full mix to the Stem Splitter server")
+            try:
+                with mix.open("rb") as handle:
+                    response = requests.post(
+                        f"{target.url}/separate",
+                        files={"file": (mix.name, handle, content_type)},
+                        params=params, headers=headers, timeout=(15, 600),
+                        allow_redirects=False,
+                    )
+            except Exception as exc:
+                raise SeparationUnavailable(
+                    "could not reach the Stem Splitter server; start or restart it and retry"
+                ) from exc
+            if response.status_code != 503 or attempt == BUSY_RETRIES - 1:
+                break
+            response.close()
+            wait = min(BUSY_MAX_BACKOFF, BUSY_BASE_BACKOFF * (2 ** attempt))
+            if progress_cb:
+                progress_cb(0.10, f"Stem Splitter server is busy; retrying in {wait} seconds")
+            _interruptible_wait(wait, cancel_cb)
+
+        if response is None or response.status_code != 200:
+            code = response.status_code if response is not None else "no response"
+            body = _error_body(response) if response is not None else ""
+            if response is not None:
+                response.close()
+            raise SeparationUnavailable(f"split server error ({code}): {body}")
+        try:
+            try:
+                payload = response.json()
+            except ValueError as exc:
+                raise SeparationUnavailable(
+                    f"split server returned a non-JSON response: {_error_body(response)}"
+                ) from exc
+        finally:
+            response.close()
+        if not isinstance(payload, dict):
+            raise SeparationUnavailable("split server returned an invalid response")
+        return payload
+
+    def _poll_job(self, target: ServerTarget, payload: dict,
+                  progress_cb: ProgressCallback, cancel_cb: CancelCallback
+                  ) -> tuple[str | None, dict, list[str], bool]:
+        raw_job_id = payload.get("job_id")
+        job_id = raw_job_id if isinstance(raw_job_id, str) and raw_job_id else None
+        stem_urls = payload.get("stems") if isinstance(payload.get("stems"), dict) else {}
+        reported_missing = [
+            str(stem).strip().lower() for stem in (payload.get("missing") or [])
+            if isinstance(stem, str) and stem.strip()
+        ]
+        completed = bool(stem_urls)
+        if stem_urls or job_id is None:
+            return job_id, stem_urls, reported_missing, completed
+
+        deadline = time.monotonic() + JOB_TIMEOUT_SECONDS
+        while time.monotonic() < deadline:
+            _interruptible_wait(2.0, cancel_cb)
+            response, _ = self._get_authed(
+                f"{target.url}/jobs/{job_id}", target, timeout=30,
+            )
+            try:
+                if response.status_code != 200:
+                    raise SeparationUnavailable(
+                        f"split server job poll failed ({response.status_code}): "
+                        f"{_error_body(response)}"
+                    )
+                try:
+                    job = response.json()
+                except ValueError as exc:
+                    raise SeparationUnavailable(
+                        f"split server returned a non-JSON job response: {_error_body(response)}"
+                    ) from exc
+            finally:
+                response.close()
+            if not isinstance(job, dict):
+                raise SeparationUnavailable("split server returned an invalid job response")
+            state = str(job.get("status") or "").lower()
+            if state in ("complete", "completed", "done"):
+                stem_urls = job.get("stems") if isinstance(job.get("stems"), dict) else {}
+                reported_missing = [
+                    str(stem).strip().lower() for stem in (job.get("missing") or [])
+                    if isinstance(stem, str) and stem.strip()
+                ]
+                return job_id, stem_urls, reported_missing, True
+            if state in ("failed", "error", "canceled", "cancelled"):
+                raise SeparationUnavailable(
+                    f"split server job failed: {job.get('error') or state}"
+                )
+            raw_progress = job.get("progress")
+            try:
+                fraction = float(raw_progress)
+                if fraction > 1:
+                    fraction /= 100.0
+            except (TypeError, ValueError):
+                fraction = 0.35
+            fraction = max(0.0, min(1.0, fraction))
+            if progress_cb:
+                progress_cb(
+                    0.12 + fraction * 0.58,
+                    f"Separating on server ({int(fraction * 100)}%)",
+                )
+        raise SeparationUnavailable(
+            f"split server job timed out after {JOB_TIMEOUT_SECONDS // 60} minutes"
+        )
+
+    def _download_stems(self, target: ServerTarget, stem_urls: dict,
+                        requested: list[str], out_dir: Path,
+                        progress_cb: ProgressCallback,
+                        cancel_cb: CancelCallback) -> dict[str, Path]:
+        download_items = list(stem_urls.items())
+        normalized = {name: _normalize_stem_id(str(name)) for name, _url in download_items}
+        requested_set = set(requested)
+        if requested_set.issubset({stem for stem in normalized.values() if stem}):
+            download_items = [
+                (name, url) for name, url in download_items
+                if normalized.get(name) in requested_set
+            ]
+
+        result_dir = out_dir / "server_stems"
+        result_dir.mkdir(parents=True, exist_ok=True)
+        produced: dict[str, Path] = {}
+        total = max(1, len(download_items))
+        for index, (name, raw_url) in enumerate(download_items):
+            if cancel_cb:
+                cancel_cb()
+            if not isinstance(raw_url, str) or not raw_url:
+                continue
+            url = f"{target.url}{raw_url}" if raw_url.startswith("/") else raw_url
+            if progress_cb:
+                progress_cb(0.72 + 0.22 * (index / total), f"Downloading {name}")
+            response, final_url = self._get_authed(url, target, timeout=180, stream=True)
+            destination = None
+            try:
+                if response.status_code != 200:
+                    raise SeparationUnavailable(
+                        f"stem download failed for '{name}': HTTP {response.status_code} "
+                        f"from {_redact_url(final_url)}"
+                    )
+                clean_url = str(final_url).split("?", 1)[0].split("#", 1)[0]
+                suffix = Path(clean_url).suffix.lower()
+                extension = suffix if suffix in AUDIO_EXTENSIONS else ".wav"
+                stem_id = _normalize_stem_id(str(name)) or _sanitize(str(name))
+                destination = result_dir / f"{stem_id}{extension}"
+                with destination.open("wb") as output:
+                    for chunk in response.iter_content(chunk_size=1024 * 1024):
+                        if cancel_cb:
+                            cancel_cb()
+                        if chunk:
+                            output.write(chunk)
+                produced.setdefault(stem_id, destination)
+            except Exception:
+                if destination is not None:
+                    try:
+                        destination.unlink()
+                    except OSError:
+                        pass
+                raise
+            finally:
+                response.close()
+        return produced
+
     def separate(self, mix: Path, out_dir: Path, stems: tuple[str, ...],
                  progress_cb: ProgressCallback = None,
                  cancel_cb: CancelCallback = None) -> dict[str, Path]:
@@ -364,120 +574,11 @@ class SeparationClient:
 
         if progress_cb:
             progress_cb(0.05, "Connecting to the Stem Splitter server")
-        content_type = mimetypes.guess_type(mix.name)[0] or {
-            ".ogg": "audio/ogg", ".opus": "audio/opus", ".wav": "audio/wav",
-            ".flac": "audio/flac", ".mp3": "audio/mpeg", ".m4a": "audio/mp4",
-        }.get(mix.suffix.lower(), "application/octet-stream")
-        headers = {"X-API-Key": target.api_key} if target.api_key else None
-        params = {"model": target.model, "stems": ",".join(requested)}
-        requests = self._requests()
+        payload = self._submit(target, mix, requested, progress_cb, cancel_cb)
 
-        response = None
-        for attempt in range(BUSY_RETRIES):
-            if cancel_cb:
-                cancel_cb()
-            if progress_cb:
-                progress_cb(0.08, "Uploading the full mix to the Stem Splitter server")
-            try:
-                with mix.open("rb") as handle:
-                    response = requests.post(
-                        f"{target.url}/separate",
-                        files={"file": (mix.name, handle, content_type)},
-                        params=params, headers=headers, timeout=(15, 600),
-                        allow_redirects=False,
-                    )
-            except Exception as exc:
-                raise SeparationUnavailable(
-                    "could not reach the Stem Splitter server; start or restart it and retry"
-                ) from exc
-            if response.status_code != 503:
-                break
-            if attempt == BUSY_RETRIES - 1:
-                break
-            response.close()
-            wait = min(BUSY_MAX_BACKOFF, BUSY_BASE_BACKOFF * (2 ** attempt))
-            if progress_cb:
-                progress_cb(0.10, f"Stem Splitter server is busy; retrying in {wait} seconds")
-            _interruptible_wait(wait, cancel_cb)
-
-        if response is None or response.status_code != 200:
-            code = response.status_code if response is not None else "no response"
-            body = _error_body(response) if response is not None else ""
-            if response is not None:
-                response.close()
-            raise SeparationUnavailable(f"split server error ({code}): {body}")
-        try:
-            try:
-                payload = response.json()
-            except ValueError as exc:
-                raise SeparationUnavailable(
-                    f"split server returned a non-JSON response: {_error_body(response)}"
-                ) from exc
-        finally:
-            response.close()
-        if not isinstance(payload, dict):
-            raise SeparationUnavailable("split server returned an invalid response")
-
-        job_id = payload.get("job_id")
-        stem_urls = payload.get("stems") if isinstance(payload.get("stems"), dict) else {}
-        reported_missing = [
-            str(stem).strip().lower() for stem in (payload.get("missing") or [])
-            if isinstance(stem, str) and stem.strip()
-        ]
-        completed = bool(stem_urls)
-        if not stem_urls and isinstance(job_id, str) and job_id:
-            deadline = time.monotonic() + JOB_TIMEOUT_SECONDS
-            while time.monotonic() < deadline:
-                _interruptible_wait(2.0, cancel_cb)
-                job_response, _ = self._get_authed(
-                    f"{target.url}/jobs/{job_id}", target, timeout=30,
-                )
-                try:
-                    if job_response.status_code != 200:
-                        raise SeparationUnavailable(
-                            f"split server job poll failed ({job_response.status_code}): "
-                            f"{_error_body(job_response)}"
-                        )
-                    try:
-                        job = job_response.json()
-                    except ValueError as exc:
-                        raise SeparationUnavailable(
-                            f"split server returned a non-JSON job response: "
-                            f"{_error_body(job_response)}"
-                        ) from exc
-                finally:
-                    job_response.close()
-                if not isinstance(job, dict):
-                    raise SeparationUnavailable("split server returned an invalid job response")
-                state = str(job.get("status") or "").lower()
-                if state in ("complete", "completed", "done"):
-                    stem_urls = job.get("stems") if isinstance(job.get("stems"), dict) else {}
-                    reported_missing = [
-                        str(stem).strip().lower() for stem in (job.get("missing") or [])
-                        if isinstance(stem, str) and stem.strip()
-                    ]
-                    completed = True
-                    break
-                if state in ("failed", "error", "canceled", "cancelled"):
-                    raise SeparationUnavailable(
-                        f"split server job failed: {job.get('error') or state}"
-                    )
-                raw_progress = job.get("progress")
-                try:
-                    fraction = float(raw_progress)
-                    if fraction > 1:
-                        fraction /= 100.0
-                except (TypeError, ValueError):
-                    fraction = 0.35
-                if progress_cb:
-                    progress_cb(
-                        0.12 + max(0.0, min(1.0, fraction)) * 0.58,
-                        f"Separating on server ({int(max(0.0, min(1.0, fraction)) * 100)}%)",
-                    )
-            else:
-                raise SeparationUnavailable(
-                    f"split server job timed out after {JOB_TIMEOUT_SECONDS // 60} minutes"
-                )
+        job_id, stem_urls, reported_missing, completed = self._poll_job(
+            target, payload, progress_cb, cancel_cb,
+        )
         if not stem_urls:
             if completed and isinstance(job_id, str):
                 self._cleanup(target, job_id)
@@ -487,61 +588,12 @@ class SeparationClient:
                 )
             raise SeparationUnavailable("split server returned no stems")
 
-        download_items = list(stem_urls.items())
-        normalized = {name: _normalize_stem_id(str(name)) for name, _url in download_items}
-        requested_set = set(requested)
-        if requested_set.issubset({stem for stem in normalized.values() if stem}):
-            download_items = [
-                (name, url) for name, url in download_items
-                if normalized.get(name) in requested_set
-            ]
-
-        result_dir = out_dir / "server_stems"
-        result_dir.mkdir(parents=True, exist_ok=True)
-        produced: dict[str, Path] = {}
         try:
-            total = max(1, len(download_items))
-            for index, (name, raw_url) in enumerate(download_items):
-                if cancel_cb:
-                    cancel_cb()
-                if not isinstance(raw_url, str) or not raw_url:
-                    continue
-                url = f"{target.url}{raw_url}" if raw_url.startswith("/") else raw_url
-                if progress_cb:
-                    progress_cb(0.72 + 0.22 * (index / total), f"Downloading {name}")
-                stem_response, final_url = self._get_authed(
-                    url, target, timeout=180, stream=True,
-                )
-                destination = None
-                try:
-                    if stem_response.status_code != 200:
-                        raise SeparationUnavailable(
-                            f"stem download failed for '{name}': HTTP {stem_response.status_code} "
-                            f"from {_redact_url(final_url)}"
-                        )
-                    clean_url = str(final_url).split("?", 1)[0].split("#", 1)[0]
-                    suffix = Path(clean_url).suffix.lower()
-                    extension = suffix if suffix in AUDIO_EXTENSIONS else ".wav"
-                    stem_id = _normalize_stem_id(str(name)) or _sanitize(str(name))
-                    destination = result_dir / f"{stem_id}{extension}"
-                    with destination.open("wb") as output:
-                        for chunk in stem_response.iter_content(chunk_size=1024 * 1024):
-                            if cancel_cb:
-                                cancel_cb()
-                            if chunk:
-                                output.write(chunk)
-                    produced.setdefault(stem_id, destination)
-                except Exception:
-                    if destination is not None:
-                        try:
-                            destination.unlink()
-                        except OSError:
-                            pass
-                    raise
-                finally:
-                    stem_response.close()
+            produced = self._download_stems(
+                target, stem_urls, requested, out_dir, progress_cb, cancel_cb,
+            )
         finally:
-            if completed and isinstance(job_id, str):
+            if completed and job_id is not None:
                 self._cleanup(target, job_id)
 
         missing = [stem for stem in requested if stem not in produced]

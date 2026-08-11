@@ -25,7 +25,7 @@ class CompletingExporter:
         return SimpleNamespace(title="Test Song")
 
     @staticmethod
-    def export_minus_mix(source, output_dir, selected, *, separate_missing,
+    def export_minus_mix(source, output_dir, selected, *, stem_provider,
                          progress_cb, cancel_cb, log):
         cancel_cb()
         progress_cb("rendering", 0.78, "Creating backing track")
@@ -63,6 +63,42 @@ def test_single_export_runs_in_background_and_publishes_result(tmp_path):
     assert manager.is_active() is False
 
 
+def test_single_export_reuses_its_unchanged_prepared_source(tmp_path):
+    source = tmp_path / "song.feedpak"
+    source.write_bytes(b"source")
+    prepared = SimpleNamespace(info=SimpleNamespace(title="Prepared Song"))
+    received = []
+
+    class PreparedExporter(CompletingExporter):
+        @staticmethod
+        def prepare_source(source_path):
+            assert source_path == source.resolve()
+            return prepared
+
+        @staticmethod
+        def inspect_source(source_path):
+            raise AssertionError("prepared source should avoid a second inspection")
+
+        @staticmethod
+        def export_minus_mix(source, output_dir, selected, *, prepared_source,
+                             stem_provider, progress_cb, cancel_cb, log):
+            received.append(prepared_source)
+            return CompletingExporter.export_minus_mix(
+                source, output_dir, selected, stem_provider=stem_provider,
+                progress_cb=progress_cb,
+                cancel_cb=cancel_cb, log=log,
+            )
+
+    manager = single.SingleExportManager(
+        PreparedExporter(), SimpleNamespace(), _log(),
+    )
+    started = manager.start(source, tmp_path, ["guitar"])
+    completed = _wait(manager, started["id"])
+
+    assert completed["status"] == "completed"
+    assert received == [prepared]
+
+
 def test_single_export_cancel_reaches_worker_checkpoint(tmp_path):
     source = tmp_path / "song.feedpak"
     source.write_bytes(b"source")
@@ -72,7 +108,7 @@ def test_single_export_cancel_reaches_worker_checkpoint(tmp_path):
 
     class BlockingExporter(CompletingExporter):
         @staticmethod
-        def export_minus_mix(source, output_dir, selected, *, separate_missing,
+        def export_minus_mix(source, output_dir, selected, *, stem_provider,
                              progress_cb, cancel_cb, log):
             progress_cb("rendering", 0.78, "Creating backing track")
             entered.set()

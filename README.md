@@ -21,8 +21,10 @@ that best-effort request fails. Requested stems are streamed to the temporary
 workspace rather than buffered in memory, and unrequested outputs are not
 downloaded when the server uses recognisable standard stem labels.
 
-The subtraction happens on decoded audio in FFmpeg and the result is encoded
-once to Ogg Vorbis. Every arrangement, lyric track, rig, cover and other
+The subtraction happens on decoded audio in FFmpeg. The playable mix and its
+optional preview are normally rendered together from one decoded filter graph;
+an independent preview fallback preserves compatibility without failing the
+main export. Every arrangement, lyric track, rig, cover and other
 non-stem asset is copied into a new zip-form feedpak. The manifest is rewritten
 to one `full` stem and the preview is rebuilt from the MinusMix audio.
 
@@ -30,7 +32,8 @@ to one `full` stem and the preview is rebuilt from the MinusMix audio.
 
 - Never edits, renames or deletes the source package.
 - Never overwrites an output; collisions gain ` (2)`, ` (3)`, etc.
-- Builds a temporary archive in the destination folder and atomically renames it.
+- Builds a temporary archive in the destination folder and publishes it with an
+  atomic no-replace strategy.
 - Rejects unsafe/duplicate archive member paths and escaping directory symlinks.
 - Accepts output-folder writes only from a loopback client, so optional LAN mode
   does not expose an arbitrary filesystem-write endpoint.
@@ -58,11 +61,18 @@ and rhythm guitar audio while leaving all lead/rhythm charts in the new pack.
 
 ## Batch mode
 
-Batch mode scans `.feedpak` and `.sloppak` files recursively and recreates the
-source folder structure below a separately chosen output folder. It skips
-existing outputs and songs previously derived by MinusMix by default, records
-per-file failures without stopping the queue, persists recent job status, and
-supports safe cancellation.
+Batch mode scans `.feedpak` and `.sloppak` files recursively. By default it
+recreates the source folder structure below the chosen output folder. Users can
+instead select flat output, which writes every generated FeedPak directly in
+the output folder and gives filename collisions deterministic numbered names.
+The batch skips existing outputs and songs previously derived by MinusMix by
+default, records per-file failures without stopping the queue, persists recent
+job status, and supports safe cancellation.
+
+Folder scanning runs as an observable background job and can be canceled
+between packages. Starting a batch reuses the completed authoritative scan when
+source file signatures and planned output existence are unchanged; otherwise it
+automatically scans again before writing anything.
 
 Separation runs sequentially to avoid GPU-memory contention. Feedpaks with a
 saved selected stem bypass the model. For unsplit sources, a byte-identical full

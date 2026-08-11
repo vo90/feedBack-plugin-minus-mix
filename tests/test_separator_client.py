@@ -91,6 +91,23 @@ def test_status_discovers_current_stem_splitter_state_without_importing_plugin(t
     assert health.closed is True
 
 
+def test_ready_server_resolution_is_reused_briefly(tmp_path):
+    _write_config(tmp_path)
+    requests = FakeRequests()
+    requests.get_responses.append(FakeResponse(payload={
+        "status": "ok",
+        "warmup": {"bs_roformer_sw": "ready"},
+    }))
+    client = separator_client.SeparationClient(tmp_path, _log(), requests)
+
+    first = client.status()
+    second = client.status()
+
+    assert first["ready"] is True
+    assert second["ready"] is True
+    assert len(requests.calls) == 1
+
+
 def test_status_explains_model_download_in_progress(tmp_path):
     _write_config(tmp_path)
     requests = FakeRequests()
@@ -104,6 +121,36 @@ def test_status_explains_model_download_in_progress(tmp_path):
     assert status["ready"] is False
     assert "downloading" in status["reason"]
     assert "finish downloading models" in status["reason"]
+
+
+def test_status_uses_configured_server_when_local_server_is_not_ready(tmp_path):
+    _write_config(tmp_path)
+    (tmp_path / "config.json").write_text(json.dumps({
+        "demucs_server_url": "https://split.example.test",
+    }), encoding="utf-8")
+    requests = FakeRequests()
+    local_health = FakeResponse(payload={
+        "status": "ok",
+        "warmup": {"bs_roformer_sw": "downloading"},
+    })
+    remote_health = FakeResponse(payload={
+        "status": "ok",
+        "device": "cuda",
+        "gpu": True,
+        "warmup": {"bs_roformer_sw": "ready"},
+    })
+    requests.get_responses.extend([local_health, remote_health])
+
+    status = separator_client.SeparationClient(tmp_path, _log(), requests).status()
+
+    assert status["ready"] is True
+    assert status["source"] == "configured"
+    assert [call[1] for call in requests.calls] == [
+        "http://127.0.0.1:7865/health",
+        "https://split.example.test/health",
+    ]
+    assert local_health.closed is True
+    assert remote_health.closed is True
 
 
 def test_status_without_server_is_actionable(tmp_path):

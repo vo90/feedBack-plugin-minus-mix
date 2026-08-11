@@ -1,3 +1,5 @@
 pytest>=8
+pytest-cov>=6
+ruff>=0.12
 PyYAML>=6
 fastapi>=0.110,<1

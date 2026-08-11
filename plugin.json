@@ -7,7 +7,7 @@
   "screen": "screen.html",
   "styles": "assets/plugin.css",
   "routes": "routes.py",
-  "category": "audio",
+  "category": "tools",
   "nav": {
     "label": "MinusMix",
     "screen": "plugin-minus_mix"

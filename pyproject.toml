@@ -1,3 +1,14 @@
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = "--strict-markers --cov=batch --cov=exporter --cov=routes --cov=separator_client --cov=single --cov-report=term-missing:skip-covered --cov-fail-under=70"
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "B", "I", "UP", "C90"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 20
 
