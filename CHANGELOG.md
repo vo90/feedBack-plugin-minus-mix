@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.0
 
 - Bounded batch status snapshots before copying rows, keeping polling work and
   memory stable for very large queues.
