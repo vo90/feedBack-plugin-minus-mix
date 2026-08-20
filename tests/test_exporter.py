@@ -173,6 +173,27 @@ def test_atomic_publish_is_no_replace_across_processes(tmp_path):
     }
 
 
+def test_export_rejects_unwritable_destination_before_audio_work(tmp_path, monkeypatch):
+    source = tmp_path / "song.feedpak"
+    source.write_bytes(b"source is not inspected before the output check")
+    output_dir = tmp_path / "exports"
+    output_dir.mkdir()
+
+    def refuse_probe(*args, **kwargs):
+        raise PermissionError("read only")
+
+    monkeypatch.setattr(exporter.tempfile, "mkstemp", refuse_probe)
+    monkeypatch.setattr(
+        exporter, "_ffmpeg_cmd",
+        lambda: (_ for _ in ()).throw(AssertionError("audio work started")),
+    )
+
+    with pytest.raises(exporter.ExportError, match="cannot write"):
+        exporter.export_minus_mix(source, output_dir, ["guitar"])
+
+    assert list(output_dir.iterdir()) == []
+
+
 @pytest.mark.skipif(not FFMPEG, reason="ffmpeg is required for a real-audio export")
 def test_export_removes_selected_audio_preserves_assets_and_never_mutates_source(tmp_path):
     source = _make_source(tmp_path)

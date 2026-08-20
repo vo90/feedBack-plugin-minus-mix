@@ -42,9 +42,11 @@ def _hash(path: Path) -> str:
 
 
 class FakeExporter:
+    ExportError = exporter.ExportError
     inspect_source = staticmethod(exporter.inspect_source)
     desired_output_path = staticmethod(exporter.desired_output_path)
     stem_label = staticmethod(exporter.stem_label)
+    validate_output_directory = staticmethod(exporter.validate_output_directory)
 
     @staticmethod
     def export_minus_mix(source, output_dir, selected, *, stem_provider,
@@ -441,6 +443,87 @@ def test_batch_cancel_stops_at_model_checkpoint_and_cancels_waiting_files(tmp_pa
     assert canceled["counts"]["done"] == 0
     assert canceled["counts"]["canceled"] == 2
     assert not list(output_root.rglob("*.feedpak"))
+
+
+def test_batch_rejects_unwritable_destination_before_worker_starts(tmp_path, monkeypatch):
+    source_root = tmp_path / "sources"
+    output_root = tmp_path / "outputs"
+    output_root.mkdir()
+    _pak(source_root / "one.feedpak", guitar=True)
+    manager = batch.BatchManager(
+        FakeExporter(), FakeService(), tmp_path / "config",
+        SimpleNamespace(
+            exception=lambda *args, **kwargs: None,
+            warning=lambda *args, **kwargs: None,
+        ),
+    )
+
+    monkeypatch.setattr(
+        exporter.tempfile, "mkstemp",
+        lambda *args, **kwargs: (_ for _ in ()).throw(PermissionError("read only")),
+    )
+
+    with pytest.raises(batch.BatchError, match="cannot write"):
+        manager.start(
+            input_dir=str(source_root), output_dir=str(output_root),
+            excluded_stems=["guitar"], recursive=True,
+            skip_existing=True, skip_derived=True,
+        )
+
+    assert manager.starting is False
+    assert manager.active_id is None
+    assert manager.jobs == {}
+
+
+def test_batch_cancel_after_publication_completes_current_and_cancels_rest(tmp_path):
+    source_root = tmp_path / "sources"
+    output_root = tmp_path / "outputs"
+    output_root.mkdir()
+    _pak(source_root / "one.feedpak", guitar=True)
+    _pak(source_root / "two.feedpak", guitar=True)
+
+    class PublishingExporter(FakeExporter):
+        def __init__(self):
+            self.published = threading.Event()
+            self.release = threading.Event()
+
+        def export_minus_mix(self, source, output_dir, selected, *, stem_provider,
+                             progress_cb, cancel_cb, log):
+            del stem_provider, progress_cb, cancel_cb, log
+            target = exporter.desired_output_path(output_dir, source, selected)
+            target.write_bytes(b"published")
+            self.published.set()
+            assert self.release.wait(1.0)
+            return SimpleNamespace(
+                output_path=target, output_filename=target.name,
+                temporary_separation_used=False, preview_created=True,
+            )
+
+    publishing_exporter = PublishingExporter()
+    manager = batch.BatchManager(
+        publishing_exporter, FakeService(), tmp_path / "config",
+        SimpleNamespace(
+            exception=lambda *args, **kwargs: None,
+            warning=lambda *args, **kwargs: None,
+        ),
+    )
+    started = manager.start(
+        input_dir=str(source_root), output_dir=str(output_root),
+        excluded_stems=["guitar"], recursive=True,
+        skip_existing=True, skip_derived=True,
+    )
+    assert publishing_exporter.published.wait(1.0)
+
+    canceling = manager.cancel(started["id"])
+    publishing_exporter.release.set()
+    canceled = _wait(manager, started["id"])
+
+    assert canceling["status"] == "canceling"
+    assert canceled["status"] == "canceled"
+    assert canceled["counts"]["done"] == 1
+    assert canceled["counts"]["canceled"] == 1
+    assert (output_root / "one (No Guitar).feedpak").is_file()
+    assert not (output_root / "two (No Guitar).feedpak").exists()
 
 
 def test_batch_reserves_start_while_authoritative_scan_is_running(tmp_path):

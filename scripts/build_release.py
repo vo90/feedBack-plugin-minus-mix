@@ -10,6 +10,7 @@ from pathlib import Path
 
 PLUGIN_FILES = (
     "CHANGELOG.md",
+    "LICENSE",
     "README.md",
     "batch.py",
     "exporter.py",
@@ -52,18 +53,26 @@ def build_release(
 
     output_dir.mkdir(parents=True, exist_ok=True)
     archive_path = output_dir / f"MinusMix-{version}.zip"
+    runtime_files = _runtime_files(repo_root)
     with zipfile.ZipFile(
         archive_path,
         "w",
         compression=zipfile.ZIP_DEFLATED,
         compresslevel=9,
     ) as archive:
-        for source in _runtime_files(repo_root):
+        for source in runtime_files:
             relative = source.relative_to(repo_root).as_posix()
             archive.write(source, f"{ARCHIVE_ROOT}/{relative}")
 
     with zipfile.ZipFile(archive_path) as archive:
         names = set(archive.namelist())
+        expected = {
+            f"{ARCHIVE_ROOT}/{source.relative_to(repo_root).as_posix()}"
+            for source in runtime_files
+        }
+        missing = sorted(expected - names)
+        if missing:
+            raise RuntimeError(f"Release archive is missing: {', '.join(missing)}")
         manifest_path = f"{ARCHIVE_ROOT}/plugin.json"
         if manifest_path not in names:
             raise RuntimeError(f"Release archive is missing {manifest_path}")

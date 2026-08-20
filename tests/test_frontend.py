@@ -17,6 +17,11 @@ def test_search_engine_and_tab_state_helpers():
     script = r"""
 const helpers = require('./screen.js');
 const songs = [{filename: 'new.feedpak'}];
+const quietEngine = helpers.engineStatusPresentation(false, true, {});
+const requiredEngine = helpers.engineStatusPresentation(true, true, {ready: false});
+const readyEngine = helpers.engineStatusPresentation(
+  true, true, {ready: true, reason: 'managed local server ready'}
+);
 process.stdout.write(JSON.stringify({
   current: helpers.sourceResultIsCurrent(4, 4),
   stale: helpers.sourceResultIsCurrent(3, 4),
@@ -24,9 +29,12 @@ process.stdout.write(JSON.stringify({
   missingSelection: helpers.resolvedSourceSelection(songs, '', 'old.feedpak'),
   visibleSelection: helpers.resolvedSourceSelection(songs, '', 'new.feedpak'),
   cardSelection: helpers.resolvedSourceSelection(songs, 'card.feedpak', 'old.feedpak'),
-  quietEngine: helpers.engineStatusPresentation(false, true, {}).kind,
-  requiredEngine: helpers.engineStatusPresentation(true, true, {ready: false}).kind,
-  readyEngine: helpers.engineStatusPresentation(true, true, {ready: true}).kind,
+  quietEngine: quietEngine.kind,
+  quietEngineText: quietEngine.text,
+  requiredEngine: requiredEngine.kind,
+  requiredEngineText: requiredEngine.text,
+  readyEngine: readyEngine.kind,
+  readyEngineText: readyEngine.text,
   wrapRight: helpers.nextTabIndex(1, 'ArrowRight', 2),
   wrapLeft: helpers.nextTabIndex(0, 'ArrowLeft', 2),
   ignoredKey: helpers.nextTabIndex(0, 'Enter', 2),
@@ -34,7 +42,7 @@ process.stdout.write(JSON.stringify({
 """
     result = subprocess.run(
         [NODE, "-e", script], cwd=ROOT,
-        text=True, capture_output=True, check=False,
+        text=True, encoding="utf-8", capture_output=True, check=False,
     )
 
     assert result.returncode == 0, result.stderr
@@ -46,8 +54,17 @@ process.stdout.write(JSON.stringify({
         "visibleSelection": "new.feedpak",
         "cardSelection": "card.feedpak",
         "quietEngine": "not-needed",
+        "quietEngineText": (
+            "The managed local Stem Splitter server is not required for the current selection."
+        ),
         "requiredEngine": "not-ready",
+        "requiredEngineText": (
+            "Temporary separation unavailable — start the managed local server in Stem Splitter"
+        ),
         "readyEngine": "ready",
+        "readyEngineText": (
+            "Managed local Stem Splitter server ready — managed local server ready"
+        ),
         "wrapRight": 0,
         "wrapLeft": 1,
         "ignoredKey": None,
@@ -77,7 +94,7 @@ process.stdout.write(JSON.stringify(calls));
 """
     result = subprocess.run(
         [NODE, "-e", script], cwd=ROOT,
-        text=True, capture_output=True, check=False,
+        text=True, encoding="utf-8", capture_output=True, check=False,
     )
 
     assert result.returncode == 0, result.stderr

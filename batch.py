@@ -802,11 +802,20 @@ class BatchManager:
                 )
             if scan["counts"]["ready"] <= 0:
                 raise BatchError("the scan found no new feedpaks to convert")
+            try:
+                self.exporter.validate_output_directory(Path(scan["output_dir"]))
+            except self.exporter.ExportError as exc:
+                raise BatchError(str(exc)) from exc
             if scan["counts"]["needs_separation"]:
                 status = self.separator.status()
                 if not status.get("ready"):
-                    reason = status.get("reason") or "Stem Splitter server is unavailable"
-                    raise BatchError(f"start the Stem Splitter server before this batch: {reason}")
+                    reason = status.get("reason") or (
+                        "Stem Splitter's managed local server is unavailable"
+                    )
+                    raise BatchError(
+                        "start Stem Splitter's managed local server before this batch: "
+                        f"{reason}"
+                    )
         except Exception:
             with self.lock:
                 self.starting = False
@@ -1038,7 +1047,6 @@ class BatchManager:
                 stem_provider=provider, progress_cb=progress,
                 cancel_cb=lambda: self._checkpoint(context), log=self.log,
             )
-            self._checkpoint(context)
             with self.lock:
                 item = self.jobs[context.job_id]["items"][index]
                 item.update({

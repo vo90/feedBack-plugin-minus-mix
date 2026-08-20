@@ -3,9 +3,13 @@ from __future__ import annotations
 
 import threading
 import time
+import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 
+import yaml
+
+import exporter
 import single
 
 
@@ -97,6 +101,63 @@ def test_single_export_reuses_its_unchanged_prepared_source(tmp_path):
 
     assert completed["status"] == "completed"
     assert received == [prepared]
+
+
+def test_cancel_after_atomic_publication_keeps_single_export_completed(
+        tmp_path, monkeypatch):
+    source = tmp_path / "song.feedpak"
+    manifest = {
+        "title": "Test Song",
+        "artist": "Test Artist",
+        "stems": [
+            {"id": "full", "file": "stems/full.ogg"},
+            {"id": "guitar", "file": "stems/guitar.ogg"},
+        ],
+    }
+    with zipfile.ZipFile(source, "w") as archive:
+        archive.writestr("manifest.yaml", yaml.safe_dump(manifest))
+        archive.writestr("stems/full.ogg", b"full")
+        archive.writestr("stems/guitar.ogg", b"guitar")
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    published = threading.Event()
+    release = threading.Event()
+
+    def render_without_ffmpeg(
+            ffmpeg, prepared, selected, extracted, temporary, work, cancel_cb):
+        del ffmpeg, prepared, selected, extracted, temporary, cancel_cb
+        full_mix = work / "minus-mix-full.ogg"
+        preview = work / "preview.ogg"
+        full_mix.write_bytes(b"rendered")
+        preview.write_bytes(b"preview")
+        return exporter.RenderedAudio(full_mix, preview, True)
+
+    def publish_then_wait(prepared, destination, plan):
+        target = exporter.desired_output_path(
+            destination, prepared.source, suffix=plan.suffix,
+        )
+        target.write_bytes(b"published")
+        published.set()
+        assert release.wait(1.0)
+        return target
+
+    monkeypatch.setattr(exporter, "_ffmpeg_cmd", lambda: "ffmpeg")
+    monkeypatch.setattr(exporter, "_render_export_audio", render_without_ffmpeg)
+    monkeypatch.setattr(exporter, "_publish_package", publish_then_wait)
+    manager = single.SingleExportManager(
+        exporter, SimpleNamespace(status=lambda: {"ready": False}), _log(),
+    )
+
+    started = manager.start(source, output_dir, ["guitar"])
+    assert published.wait(1.0)
+    canceling = manager.cancel(started["id"])
+    release.set()
+    completed = _wait(manager, started["id"])
+
+    assert canceling["status"] == "canceling"
+    assert completed["status"] == "completed"
+    assert completed["result"]["filename"] == "song (No Guitar).feedpak"
+    assert (output_dir / completed["result"]["filename"]).read_bytes() == b"published"
 
 
 def test_single_export_cancel_reaches_worker_checkpoint(tmp_path):
