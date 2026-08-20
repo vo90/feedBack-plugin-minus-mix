@@ -22,16 +22,17 @@
       return {
         kind: 'not-needed',
         text: contextKnown
-          ? 'Stem Splitter is not required for the current selection.'
-          : 'Stem Splitter is only required when selected audio is not already saved.',
+          ? 'The managed local Stem Splitter server is not required for the current selection.'
+          : 'The managed local Stem Splitter server is only required when selected audio is not already saved.',
       };
     }
     return {
       kind: engine.ready ? 'ready' : 'not-ready',
       text: engine.ready
-        ? 'Stem Splitter server ready — ' + (engine.reason || 'temporary separation available')
+        ? 'Managed local Stem Splitter server ready — '
+          + (engine.reason || 'temporary separation available')
         : 'Temporary separation unavailable — '
-          + (engine.reason || 'start the server in Stem Splitter'),
+          + (engine.reason || 'start the managed local server in Stem Splitter'),
     };
   }
 
@@ -114,7 +115,10 @@
     batchBusy: false, batchActive: false, batchNotifiedId: '',
     batchPollLoading: false, batchPollFailures: 0,
     batchRenderKey: '', batchItemRows: Object.create(null),
-    separation: { available: false, ready: false, reason: 'Checking the Stem Splitter server…' },
+    separation: {
+      available: false, ready: false,
+      reason: 'Checking Stem Splitter\'s managed local server…',
+    },
   };
 
   function $(id) { return document.getElementById(id); }
@@ -300,7 +304,7 @@
       detail.textContent = 'Single-stem output • native backing playback • source preserved'
         + (needsSeparation ? ' • temporary separation' : ' • existing stem reused');
     } else if (needsSeparation && !(state.separation && state.separation.ready)) {
-      title.textContent = 'Start the Stem Splitter server first';
+      title.textContent = 'Start the managed local Stem Splitter server first';
       detail.textContent = (state.separation && state.separation.reason) || 'The selected audio must be separated temporarily.';
     } else {
       title.textContent = 'Ready when you are';
@@ -622,7 +626,7 @@
         + (counts.uses_saved_stems || 0) + ' can reuse saved stems • '
         + ((counts.skipped_existing || 0) + (counts.skipped_derived || 0)) + ' skipped safely';
       if (needsSeparation && !engineOkay) {
-        detail.textContent += ' • start the Stem Splitter server before starting';
+        detail.textContent += ' • start the managed local Stem Splitter server before starting';
       }
     } else {
       title.textContent = hasBasics ? 'Scan before starting' : 'Choose source and output folders';
@@ -973,7 +977,7 @@
   function cancelBatch() {
     if (state.batchBusy && state.batchScanJobId) {
       $('pmx-batch-cancel').disabled = true;
-      showBatchStatus('info', 'Canceling folder scan safelyâ€¦');
+      showBatchStatus('info', 'Canceling folder scan safely…');
       apiClient.cancelScan(state.batchScanJobId).then(renderBatchScanJob).catch(function (error) {
         showBatchStatus('error', error.message);
         $('pmx-batch-cancel').disabled = false;
@@ -1030,7 +1034,10 @@
       }
     }).catch(function (error) {
       var text = $('pmx-engine-text');
-      if (text) text.textContent = 'Could not refresh Stem Splitter server status — ' + error.message;
+      if (text) {
+        text.textContent = 'Could not refresh the managed local Stem Splitter server status — '
+          + error.message;
+      }
     }).finally(function () {
       state.statusLoading = false;
       if ($('pmx-engine-refresh')) $('pmx-engine-refresh').disabled = false;

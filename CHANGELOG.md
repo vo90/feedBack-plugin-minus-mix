@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+## 0.6.1 - 2026-08-20
+
+- Defined the supported separation path as Stem Splitter's managed local
+  loopback server. MinusMix now ignores remote/custom server and API-key
+  settings, while saved-stem exports remain completely server-free.
+- Made unavailable, warming, busy and interrupted server messages explicitly
+  identify the managed local server.
+- Added an MIT license to the repository and manual-install archive.
+- Refuse unwritable output folders before separation or audio rendering begins.
+- Treat atomic output publication as the cancellation commit point so completed
+  files are never reported as canceled.
+- Gate release packaging and publication on the full lint and test suite.
+- Documented local test prerequisites and repaired a folder-scan status encoding
+  glitch.
+
 ## 0.6.0
 
 - Bounded batch status snapshots before copying rows, keeping polling work and

@@ -49,6 +49,40 @@ class ExportError(RuntimeError):
     """An expected, user-actionable export refusal."""
 
 
+def validate_output_directory(output_dir: Path) -> Path:
+    """Resolve an output folder and prove that a temporary file can be published there."""
+    output_dir = Path(output_dir).resolve()
+    if not output_dir.is_absolute() or not output_dir.is_dir():
+        raise ExportError("choose an existing output folder")
+
+    fd: int | None = None
+    probe_path: Path | None = None
+    try:
+        fd, probe_name = tempfile.mkstemp(
+            prefix=".minus-mix-write-test-", suffix=".tmp", dir=output_dir,
+        )
+        probe_path = Path(probe_name)
+        os.close(fd)
+        fd = None
+        probe_path.unlink()
+    except OSError as exc:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        if probe_path is not None:
+            try:
+                probe_path.unlink()
+            except OSError:
+                pass
+        raise ExportError(
+            "MinusMix cannot write to the chosen output folder; "
+            "choose another folder or update its permissions"
+        ) from exc
+    return output_dir
+
+
 @dataclass(frozen=True)
 class StemInfo:
     id: str
@@ -714,7 +748,7 @@ def _obtain_missing_stems(provider: StemProvider | None, extracted: ExtractedAud
     if provider is None:
         raise ExportError(
             "this source has no saved " + ", ".join(missing)
-            + " stem; start Stem Splitter's server and try again"
+            + " stem; start Stem Splitter's managed local server and try again"
         )
     separation_dir = work / "temporary-separation"
     separation_dir.mkdir()
@@ -842,6 +876,7 @@ def export_minus_mix(source: Path, output_dir: Path, excluded_stems: Iterable[st
             pass
         else:
             raise ExportError("the output folder cannot be inside a directory-form source feedpak")
+    output_dir = validate_output_directory(output_dir)
 
     ffmpeg = _ffmpeg_cmd()
     if not ffmpeg:
@@ -856,7 +891,7 @@ def export_minus_mix(source: Path, output_dir: Path, excluded_stems: Iterable[st
     if missing and provider is None:
         raise ExportError(
             "this source has no saved " + ", ".join(missing)
-            + " stem; start Stem Splitter's server and try again"
+            + " stem; start Stem Splitter's managed local server and try again"
         )
 
     with tempfile.TemporaryDirectory(prefix="feedback_minus_mix_") as td:
@@ -884,7 +919,6 @@ def export_minus_mix(source: Path, output_dir: Path, excluded_stems: Iterable[st
         _report(progress_cb, "packaging", 0.94, "Packaging the new feedpak")
         final_path = _publish_package(prepared, output_dir, plan)
 
-    _report(progress_cb, "done", 1.0, "Practice feedpak created")
     return ExportResult(
         output_path=final_path,
         output_filename=final_path.name,

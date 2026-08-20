@@ -3,7 +3,10 @@ from __future__ import annotations
 
 import json
 import re
+import zipfile
 from pathlib import Path
+
+from scripts.build_release import build_release
 
 
 def test_public_identity_is_minus_mix_and_not_bundled():
@@ -43,4 +46,25 @@ def test_screen_exposes_keyboard_and_accessibility_semantics():
     assert "setAttribute('tabindex'" in script
     assert "/batch/scan-jobs" in script
     assert ":focus-visible" in css
+
+
+def test_release_archive_contains_the_license(tmp_path):
+    root = Path(__file__).resolve().parents[1]
+    license_text = (root / "LICENSE").read_text(encoding="utf-8")
+
+    archive_path = build_release(root, tmp_path)
+
+    assert license_text.startswith("MIT License\n")
+    assert "Copyright (c) 2026 Viktor Olausson" in license_text
+    with zipfile.ZipFile(archive_path) as archive:
+        archived_license = archive.read("minus_mix/LICENSE").decode("utf-8")
+    assert archived_license.replace("\r\n", "\n") == license_text.replace("\r\n", "\n")
+
+
+def test_frontend_sources_do_not_contain_known_mojibake():
+    root = Path(__file__).resolve().parents[1]
+    script = (root / "screen.js").read_text(encoding="utf-8")
+
+    assert "â€¦" not in script
+    assert "�" not in script
 

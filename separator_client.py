@@ -1,9 +1,11 @@
-"""Self-contained client for the Stem Splitter model server.
+"""Self-contained client for Stem Splitter's managed local model server.
 
 MinusMix is installed independently, so it cannot rely on an
-unreleased Python service inside another plugin.  It discovers the server that
-the released Stem Splitter already manages, speaks that server's public HTTP
-API, and writes requested stems only into caller-owned temporary storage.
+unreleased Python service inside another plugin. It discovers the loopback
+server that released Stem Splitter builds manage, speaks that server's public
+HTTP API, and writes requested stems only into caller-owned temporary storage.
+Remote, Docker-sidecar, and in-process engines are deliberately outside the
+current MinusMix support contract.
 """
 from __future__ import annotations
 
@@ -36,7 +38,7 @@ CancelCallback = Callable[[], None] | None
 
 
 class SeparationUnavailable(RuntimeError):
-    """The configured server cannot currently perform a temporary split."""
+    """The managed local server cannot currently perform a temporary split."""
 
 
 @dataclass(frozen=True)
@@ -186,7 +188,6 @@ class SeparationClient:
 
     def _targets(self) -> list[ServerTarget]:
         splitter = _read_json(self.config_dir / "stem_splitter.json")
-        app_config = _read_json(self.config_dir / "config.json")
         state = _read_json(self.config_dir / "stem_splitter_server.json")
         model = str(splitter.get("remote_model") or DEFAULT_MODEL).strip() or DEFAULT_MODEL
 
@@ -198,16 +199,6 @@ class SeparationClient:
         urls.append((f"http://127.0.0.1:{configured_port}", "managed-local", None))
         if configured_port != DEFAULT_PORT:
             urls.append((f"http://127.0.0.1:{DEFAULT_PORT}", "managed-local", None))
-
-        api_key = None
-        for key in ("demucs_api_key", "server_api_key"):
-            value = app_config.get(key)
-            if isinstance(value, str) and value.strip():
-                api_key = value.strip()
-                break
-        configured_url = _server_url(app_config.get("demucs_server_url"))
-        if configured_url:
-            urls.append((configured_url, "configured", api_key))
 
         targets: list[ServerTarget] = []
         seen: set[str] = set()
@@ -246,7 +237,7 @@ class SeparationClient:
     @staticmethod
     def _ready_reason(target: ServerTarget, health: dict) -> tuple[bool, str]:
         if str(health.get("status") or "ok").lower() not in ("ok", "ready", "healthy"):
-            return False, "Stem Splitter server reported that it is not ready"
+            return False, "Stem Splitter's managed local server reported that it is not ready"
         model_state = SeparationClient._model_state(health, target.model)
         if model_state and model_state not in ("ready", "loaded", "complete", "completed"):
             friendly = model_state.replace("_", " ")
@@ -255,9 +246,8 @@ class SeparationClient:
             )
         device = str(health.get("device") or "").strip().upper()
         gpu = bool(health.get("gpu"))
-        location = "local server" if target.kind == "managed-local" else "configured server"
         accelerator = f" · {device}{' GPU' if gpu and 'GPU' not in device else ''}" if device else ""
-        return True, f"{location} ready{accelerator}"
+        return True, f"managed local server ready{accelerator}"
 
     def _resolve(
         self, targets: list[ServerTarget] | None = None,
@@ -288,7 +278,8 @@ class SeparationClient:
                 result = (None, health, reason)
             if result is None:
                 result = (None, None, (
-                    "Stem Splitter server is not running; open Stem Splitter and start the local server"
+                    "Stem Splitter's managed local server is not running; "
+                    "open Stem Splitter and start it"
                 ))
 
             ttl = (
@@ -323,7 +314,7 @@ class SeparationClient:
             if headers and hop_headers is None:
                 self.log.warning(
                     "minus_mix: downloading %s without the server API key "
-                    "because it is off-origin from the configured server",
+                    "because it is off-origin from the managed local server",
                     _redact_url(url),
                 )
             try:
@@ -333,7 +324,8 @@ class SeparationClient:
                 )
             except Exception as exc:
                 raise SeparationUnavailable(
-                    "connection to the Stem Splitter server was lost; restart the server and retry"
+                    "connection to Stem Splitter's managed local server was lost; "
+                    "restart it and retry"
                 ) from exc
             location = response.headers.get("location") if response.status_code in REDIRECT_CODES else None
             if not location:
@@ -388,7 +380,10 @@ class SeparationClient:
             if cancel_cb:
                 cancel_cb()
             if progress_cb:
-                progress_cb(0.08, "Uploading the full mix to the Stem Splitter server")
+                progress_cb(
+                    0.08,
+                    "Uploading the full mix to Stem Splitter's managed local server",
+                )
             try:
                 with mix.open("rb") as handle:
                     response = requests.post(
@@ -399,14 +394,19 @@ class SeparationClient:
                     )
             except Exception as exc:
                 raise SeparationUnavailable(
-                    "could not reach the Stem Splitter server; start or restart it and retry"
+                    "could not reach Stem Splitter's managed local server; "
+                    "start or restart it and retry"
                 ) from exc
             if response.status_code != 503 or attempt == BUSY_RETRIES - 1:
                 break
             response.close()
             wait = min(BUSY_MAX_BACKOFF, BUSY_BASE_BACKOFF * (2 ** attempt))
             if progress_cb:
-                progress_cb(0.10, f"Stem Splitter server is busy; retrying in {wait} seconds")
+                progress_cb(
+                    0.10,
+                    f"Stem Splitter's managed local server is busy; "
+                    f"retrying in {wait} seconds",
+                )
             _interruptible_wait(wait, cancel_cb)
 
         if response is None or response.status_code != 200:
@@ -573,7 +573,7 @@ class SeparationClient:
             raise SeparationUnavailable("the temporary full-mix audio file is missing")
 
         if progress_cb:
-            progress_cb(0.05, "Connecting to the Stem Splitter server")
+            progress_cb(0.05, "Connecting to Stem Splitter's managed local server")
         payload = self._submit(target, mix, requested, progress_cb, cancel_cb)
 
         job_id, stem_urls, reported_missing, completed = self._poll_job(
