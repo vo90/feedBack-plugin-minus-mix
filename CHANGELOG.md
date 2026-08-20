@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Reworked the public README into a beginner-friendly installation, first-use,
+  troubleshooting and technical reference guide.
+
 ## 0.6.1 - 2026-08-20
 
 - Defined the supported separation path as Stem Splitter's managed local
