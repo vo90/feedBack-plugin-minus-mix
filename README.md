@@ -32,6 +32,15 @@ For example:
 | Vocals | An instrumental-style copy with the estimated vocal audio removed |
 | Guitar + Vocals | A copy with both estimated parts removed |
 
+Two useful terms:
+
+- A **FeedPak** is a song package used by FeedBack.
+- A **stem** is one part of a recording, such as guitar, drums or vocals.
+
+The separation is produced by an AI audio model, so it will not be perfect on
+every recording. Faint bleed or small changes to other sounds can remain. This
+is normal for source separation and does not affect the original song.
+
 ## Why use MinusMix instead of muting a stem?
 
 A fully split song gives you more control, but it also stores several
@@ -45,15 +54,6 @@ On my own system, I have also noticed a clear improvement in playback latency
 when using a normal single-track song instead of a multi-stem song, particularly
 with my ASIO setup. Audio hardware and settings vary, so your experience may be
 different.
-
-Two useful terms:
-
-- A **FeedPak** is a song package used by FeedBack.
-- A **stem** is one part of a recording, such as guitar, drums or vocals.
-
-The separation is produced by an AI audio model, so it will not be perfect on
-every recording. Faint bleed or small changes to other sounds can remain. This
-is normal for source separation and does not affect the original song.
 
 ## What you need
 
