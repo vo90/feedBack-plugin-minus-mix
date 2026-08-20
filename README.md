@@ -11,6 +11,7 @@ track. Your original song is never changed.
 MinusMix can exclude guitar, bass, drums, vocals, piano, other instruments, or
 several of them together. It works on one song at a time or on a whole folder.
 
+- [Why use MinusMix instead of muting a stem?](#why-use-minusmix-instead-of-muting-a-stem)
 - [What you need](#what-you-need)
 - [Install MinusMix](#install-minusmix)
 - [Create your first MinusMix song](#create-your-first-minusmix-song)
@@ -30,6 +31,20 @@ For example:
 | Guitar | A playable copy with the guitar audio removed and the guitar charts kept |
 | Vocals | An instrumental-style copy with the estimated vocal audio removed |
 | Guitar + Vocals | A copy with both estimated parts removed |
+
+## Why use MinusMix instead of muting a stem?
+
+A fully split song gives you more control, but it also stores several
+full-length audio tracks and mixes them during playback. MinusMix creates a
+smaller, ready-to-play practice copy with your chosen instrument already
+removed. It uses less disk space, has less audio to load, always opens with the
+same mix, and may preserve more of the original sound than rebuilding the song
+from the remaining separated tracks.
+
+On my own system, I have also noticed a clear improvement in playback latency
+when using a normal single-track song instead of a multi-stem song, particularly
+with my ASIO setup. Audio hardware and settings vary, so your experience may be
+different.
 
 Two useful terms:
 
