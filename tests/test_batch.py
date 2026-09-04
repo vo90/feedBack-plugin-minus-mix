@@ -88,6 +88,7 @@ class FakeService:
     def __init__(self):
         self.calls = 0
         self.returned_dirs: list[Path] = []
+        self.live_prior_dirs: list[list[Path]] = []
 
     def status(self):
         return {"ready": True, "reason": "fake GPU"}
@@ -96,6 +97,9 @@ class FakeService:
         self.calls += 1
         cancel_cb()
         progress_cb(0.5, "model running")
+        self.live_prior_dirs.append([
+            path for path in self.returned_dirs if path.exists()
+        ])
         self.returned_dirs.append(Path(work))
         result = {}
         for stem in stems:
@@ -200,7 +204,7 @@ def test_recursive_scan_and_batch_can_flatten_outputs_with_numbered_collisions(t
     assert resumed["counts"]["skipped_existing"] == 2
 
 
-def test_batch_reuses_identical_temporary_separation_and_persists_status(tmp_path):
+def test_batch_releases_each_temporary_separation_before_the_next_item(tmp_path):
     source_root = tmp_path / "sources"
     output_root = tmp_path / "outputs"
     output_root.mkdir()
@@ -222,8 +226,10 @@ def test_batch_reuses_identical_temporary_separation_and_persists_status(tmp_pat
     assert completed["counts"]["done"] == 2
     assert completed["counts"]["failed"] == 0
     assert completed["counts"]["temporary_separations"] == 2
-    assert completed["counts"]["duplicate_audio_reused"] == 1
-    assert service.calls == 1
+    # Retained for API compatibility even though cross-item caching is disabled.
+    assert completed["counts"]["duplicate_audio_reused"] == 0
+    assert service.calls == 2
+    assert service.live_prior_dirs == [[], []]
     assert (output_root / "A" / "one (No Guitar).feedpak").is_file()
     assert (output_root / "B" / "two (No Guitar).feedpak").is_file()
     assert {_hash(first), _hash(second)} == original_hashes

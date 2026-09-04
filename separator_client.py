@@ -12,6 +12,8 @@ from __future__ import annotations
 import json
 import mimetypes
 import re
+import shutil
+import tempfile
 import threading
 import time
 from collections.abc import Callable
@@ -26,6 +28,9 @@ JOB_TIMEOUT_SECONDS = 35 * 60
 BUSY_RETRIES = 6
 BUSY_BASE_BACKOFF = 5
 BUSY_MAX_BACKOFF = 60
+INCOMPLETE_ATTEMPTS = 2
+INCOMPLETE_RETRY_BACKOFF_SECONDS = 2
+LOW_TEMP_SPACE_BYTES = 10 * 1024**3
 MAX_REDIRECTS = 5
 REDIRECT_CODES = (301, 302, 303, 307, 308)
 MAX_ERROR_BODY = 4000
@@ -39,6 +44,48 @@ CancelCallback = Callable[[], None] | None
 
 class SeparationUnavailable(RuntimeError):
     """The managed local server cannot currently perform a temporary split."""
+
+
+class IncompleteSeparationError(SeparationUnavailable):
+    """A completed server job omitted one or more requested supported stems."""
+
+    def __init__(
+        self,
+        missing: tuple[str, ...],
+        available: tuple[str, ...],
+        *,
+        attempts: int,
+        temp_free_bytes: int | None,
+    ):
+        self.missing = missing
+        self.available = available
+        self.attempts = attempts
+        self.temp_free_bytes = temp_free_bytes
+
+        attempt_label = "attempt" if attempts == 1 else "attempts"
+        stem_label = "stem" if len(missing) == 1 else "stems"
+        message = (
+            f"Stem Splitter completed {attempts} {attempt_label} without returning "
+            f"the requested {stem_label}: {', '.join(missing)}. "
+        )
+        if available:
+            message += (
+                "Available supported stems on the final attempt: "
+                f"{', '.join(available)}."
+            )
+        else:
+            message += "No supported stems were available on the final attempt."
+        if temp_free_bytes is not None and temp_free_bytes < LOW_TEMP_SPACE_BYTES:
+            free_gib = temp_free_bytes / 1024**3
+            message += (
+                f" Only {free_gib:.1f} GiB was free on MinusMix's temporary-work volume; "
+                "low temporary disk space may have contributed."
+            )
+        super().__init__(message)
+
+
+class _TerminalJobError(SeparationUnavailable):
+    """The server explicitly reported that a job reached a terminal error state."""
 
 
 @dataclass(frozen=True)
@@ -164,6 +211,33 @@ def _interruptible_wait(seconds: float, cancel_cb: CancelCallback) -> None:
         if remaining <= 0:
             return
         time.sleep(min(0.25, remaining))
+
+
+def _valid_job_id(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    return value if re.fullmatch(r"[A-Za-z0-9._-]{1,160}", value) else None
+
+
+def _available_supported_stems(stem_urls: dict) -> tuple[str, ...]:
+    found: set[str] = set()
+    for name, raw_url in stem_urls.items():
+        if not isinstance(raw_url, str) or not raw_url:
+            continue
+        stem_id = _normalize_stem_id(str(name))
+        if stem_id in SUPPORTED_STEMS:
+            found.add(stem_id)
+    return tuple(stem for stem in SUPPORTED_STEMS if stem in found)
+
+
+def _temp_volume_free_bytes(work_dir: Path) -> int | None:
+    try:
+        return int(shutil.disk_usage(work_dir).free)
+    except (OSError, TypeError, ValueError):
+        try:
+            return int(shutil.disk_usage(tempfile.gettempdir()).free)
+        except (OSError, TypeError, ValueError):
+            return None
 
 
 class SeparationClient:
@@ -335,7 +409,7 @@ class SeparationClient:
         raise RuntimeError(f"split server sent more than {MAX_REDIRECTS} redirects")
 
     def _cleanup(self, target: ServerTarget, job_id: str) -> None:
-        if not re.fullmatch(r"[A-Za-z0-9._-]{1,160}", job_id):
+        if _valid_job_id(job_id) is None:
             return
         headers = {"X-API-Key": target.api_key} if target.api_key else None
         requests = self._requests()
@@ -431,15 +505,19 @@ class SeparationClient:
     def _poll_job(self, target: ServerTarget, payload: dict,
                   progress_cb: ProgressCallback, cancel_cb: CancelCallback
                   ) -> tuple[str | None, dict, list[str], bool]:
-        raw_job_id = payload.get("job_id")
-        job_id = raw_job_id if isinstance(raw_job_id, str) and raw_job_id else None
+        job_id = _valid_job_id(payload.get("job_id"))
         stem_urls = payload.get("stems") if isinstance(payload.get("stems"), dict) else {}
         reported_missing = [
             str(stem).strip().lower() for stem in (payload.get("missing") or [])
             if isinstance(stem, str) and stem.strip()
         ]
-        completed = bool(stem_urls)
-        if stem_urls or job_id is None:
+        state = str(payload.get("status") or "").lower()
+        completed = bool(stem_urls) or state in ("complete", "completed", "done")
+        if state in ("failed", "error", "canceled", "cancelled"):
+            raise _TerminalJobError(
+                f"split server job failed: {payload.get('error') or state}"
+            )
+        if completed or job_id is None:
             return job_id, stem_urls, reported_missing, completed
 
         deadline = time.monotonic() + JOB_TIMEOUT_SECONDS
@@ -473,7 +551,7 @@ class SeparationClient:
                 ]
                 return job_id, stem_urls, reported_missing, True
             if state in ("failed", "error", "canceled", "cancelled"):
-                raise SeparationUnavailable(
+                raise _TerminalJobError(
                     f"split server job failed: {job.get('error') or state}"
                 )
             raw_progress = job.get("progress")
@@ -531,12 +609,17 @@ class SeparationClient:
                 extension = suffix if suffix in AUDIO_EXTENSIONS else ".wav"
                 stem_id = _normalize_stem_id(str(name)) or _sanitize(str(name))
                 destination = result_dir / f"{stem_id}{extension}"
+                downloaded_bytes = 0
                 with destination.open("wb") as output:
                     for chunk in response.iter_content(chunk_size=1024 * 1024):
                         if cancel_cb:
                             cancel_cb()
                         if chunk:
-                            output.write(chunk)
+                            downloaded_bytes += output.write(chunk)
+                if downloaded_bytes == 0:
+                    destination.unlink()
+                    destination = None
+                    continue
                 produced.setdefault(stem_id, destination)
             except Exception:
                 if destination is not None:
@@ -548,6 +631,98 @@ class SeparationClient:
             finally:
                 response.close()
         return produced
+
+    def _incomplete_error(
+        self,
+        requested: list[str],
+        stem_urls: dict,
+        attempt: int,
+        out_dir: Path,
+    ) -> IncompleteSeparationError | None:
+        available = _available_supported_stems(stem_urls)
+        missing = tuple(stem for stem in requested if stem not in available)
+        if not missing:
+            return None
+        return IncompleteSeparationError(
+            missing,
+            available,
+            attempts=attempt,
+            temp_free_bytes=_temp_volume_free_bytes(out_dir),
+        )
+
+    def _log_incomplete(self, error: IncompleteSeparationError) -> None:
+        missing = ",".join(error.missing)
+        available = ",".join(error.available) or "none"
+        if error.temp_free_bytes is None:
+            space = "MinusMix temporary-work-volume free space could not be measured"
+        else:
+            free_gib = error.temp_free_bytes / 1024**3
+            relation = "below" if error.temp_free_bytes < LOW_TEMP_SPACE_BYTES else "not below"
+            space = (
+                f"MinusMix temporary-work volume had {free_gib:.1f} GiB free "
+                f"({relation} the {LOW_TEMP_SPACE_BYTES / 1024**3:.0f} GiB warning threshold)"
+            )
+        self.log.warning(
+            "minus_mix: incomplete separation attempt %s/%s; missing=%s; available=%s; %s",
+            error.attempts,
+            INCOMPLETE_ATTEMPTS,
+            missing,
+            available,
+            space,
+        )
+
+    def _separate_attempt(
+        self,
+        target: ServerTarget,
+        mix: Path,
+        out_dir: Path,
+        requested: list[str],
+        attempt: int,
+        progress_cb: ProgressCallback,
+        cancel_cb: CancelCallback,
+    ) -> dict[str, Path]:
+        payload = self._submit(target, mix, requested, progress_cb, cancel_cb)
+        job_id = _valid_job_id(payload.get("job_id"))
+        attempt_dir: Path | None = None
+        keep_attempt_dir = False
+        terminal = False
+        try:
+            try:
+                polled_job_id, stem_urls, _reported_missing, completed = self._poll_job(
+                    target, payload, progress_cb, cancel_cb,
+                )
+            except _TerminalJobError:
+                terminal = True
+                raise
+            if polled_job_id is not None:
+                job_id = polled_job_id
+            terminal = completed
+            if completed:
+                incomplete = self._incomplete_error(requested, stem_urls, attempt, out_dir)
+                if incomplete is not None:
+                    raise incomplete
+            elif not stem_urls:
+                raise SeparationUnavailable("split server returned no stems")
+
+            attempt_dir = Path(tempfile.mkdtemp(prefix="server_attempt_", dir=out_dir))
+            produced = self._download_stems(
+                target, stem_urls, requested, attempt_dir, progress_cb, cancel_cb,
+            )
+            missing = tuple(stem for stem in requested if stem not in produced)
+            if missing:
+                raise IncompleteSeparationError(
+                    missing,
+                    tuple(stem for stem in SUPPORTED_STEMS if stem in produced),
+                    attempts=attempt,
+                    temp_free_bytes=_temp_volume_free_bytes(out_dir),
+                )
+            keep_attempt_dir = True
+            return {stem: produced[stem] for stem in requested}
+        finally:
+            if attempt_dir is not None and not keep_attempt_dir:
+                shutil.rmtree(attempt_dir, ignore_errors=True)
+            if terminal and job_id is not None:
+                self._cleanup(target, job_id)
 
     def separate(self, mix: Path, out_dir: Path, stems: tuple[str, ...],
                  progress_cb: ProgressCallback = None,
@@ -572,35 +747,38 @@ class SeparationClient:
         if not mix.is_file():
             raise SeparationUnavailable("the temporary full-mix audio file is missing")
 
-        if progress_cb:
-            progress_cb(0.05, "Connecting to Stem Splitter's managed local server")
-        payload = self._submit(target, mix, requested, progress_cb, cancel_cb)
+        last_progress = 0.0
 
-        job_id, stem_urls, reported_missing, completed = self._poll_job(
-            target, payload, progress_cb, cancel_cb,
-        )
-        if not stem_urls:
-            if completed and isinstance(job_id, str):
-                self._cleanup(target, job_id)
-            if reported_missing:
-                raise SeparationUnavailable(
-                    "the selected model did not produce: " + ", ".join(reported_missing)
+        def report_progress(value: float, message: str) -> None:
+            nonlocal last_progress
+            last_progress = max(last_progress, value)
+            if progress_cb:
+                progress_cb(last_progress, message)
+
+        attempt_progress = report_progress if progress_cb else None
+        report_progress(0.05, "Connecting to Stem Splitter's managed local server")
+        for attempt in range(1, INCOMPLETE_ATTEMPTS + 1):
+            try:
+                result = self._separate_attempt(
+                    target,
+                    mix,
+                    out_dir,
+                    requested,
+                    attempt,
+                    attempt_progress,
+                    cancel_cb,
                 )
-            raise SeparationUnavailable("split server returned no stems")
-
-        try:
-            produced = self._download_stems(
-                target, stem_urls, requested, out_dir, progress_cb, cancel_cb,
-            )
-        finally:
-            if completed and job_id is not None:
-                self._cleanup(target, job_id)
-
-        missing = [stem for stem in requested if stem not in produced]
-        if missing:
-            raise SeparationUnavailable(
-                "the selected model did not produce: " + ", ".join(missing)
-            )
-        if progress_cb:
-            progress_cb(1.0, "Temporary stem download complete")
-        return {stem: produced[stem] for stem in requested}
+            except IncompleteSeparationError as exc:
+                self._log_incomplete(exc)
+                if attempt == INCOMPLETE_ATTEMPTS:
+                    raise
+                report_progress(
+                    0.10,
+                    "Stem Splitter returned an incomplete result; retrying once "
+                    f"in {INCOMPLETE_RETRY_BACKOFF_SECONDS} seconds",
+                )
+                _interruptible_wait(INCOMPLETE_RETRY_BACKOFF_SECONDS, cancel_cb)
+                continue
+            report_progress(1.0, "Temporary stem download complete")
+            return result
+        raise AssertionError("incomplete retry loop exited unexpectedly")

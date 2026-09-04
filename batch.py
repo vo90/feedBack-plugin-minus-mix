@@ -1,17 +1,15 @@
 """Recursive, resumable-status batch orchestration for MinusMix exports.
 
 The queue is intentionally sequential.  Stem separation is normally GPU-bound,
-and concurrent BS-RoFormer jobs make a 4 GB card slower and less reliable.  A
-batch-scoped temporary cache still avoids repeating separation when two packs
-contain byte-identical full mixes; that cache is deleted when the batch ends.
+and concurrent BS-RoFormer jobs make a 4 GB card slower and less reliable.  Each
+separation stays in the exporter's per-song temporary workspace so large batches
+do not accumulate stem files for the lifetime of the job.
 """
 from __future__ import annotations
 
 import copy
 import json
 import os
-import shutil
-import tempfile
 import threading
 import time
 import uuid
@@ -79,67 +77,29 @@ class ScanCanceled(RuntimeError):
     """Internal folder-scan cancellation checkpoint."""
 
 
-class BatchCachingStemProvider:
-    """Provide server stems while reusing identical audio within one batch."""
+class BatchStemProvider:
+    """Provide server stems in an exporter-owned per-song workspace."""
 
-    def __init__(self, separator, cache_root: Path,
-                 cached_audio: dict[str, dict[str, Path]],
-                 checkpoint: Callable[[], None],
-                 progress: Callable[[str, float, str], None],
-                 cache_hit: Callable[[], None]):
+    def __init__(self, separator, checkpoint: Callable[[], None],
+                 progress: Callable[[str, float, str], None]):
         self.separator = separator
-        self.cache_root = cache_root
-        self.cached_audio = cached_audio
         self.checkpoint = checkpoint
         self.progress = progress
-        self.cache_hit = cache_hit
 
     def obtain(self, mix: Path, work: Path, stems: tuple[str, ...],
                full_digest: str | None) -> dict[str, Path]:
+        del full_digest  # Per-song exports do not retain a cross-item stem cache.
         self.checkpoint()
-        if not full_digest:
-            raise BatchError("the source audio digest is unavailable")
-        cached = self.cached_audio.setdefault(full_digest, {})
-        produced: dict[str, Path] = {}
-        absent: list[str] = []
-        for stem in stems:
-            cached_path = cached.get(stem)
-            if cached_path and cached_path.is_file():
-                target = work / f"cached_{stem}{cached_path.suffix}"
-                shutil.copyfile(cached_path, target)
-                produced[stem] = target
-            else:
-                absent.append(stem)
-        if not absent:
-            self.cache_hit()
-            self.progress(
-                "separating", 0.74,
-                "Reused identical audio separated earlier in this batch",
-            )
-            return produced
 
         def separation_progress(value, message) -> None:
             self.checkpoint()
             mapped = 0.08 + max(0.0, min(1.0, float(value))) * 0.66
             self.progress("separating", mapped, str(message or "Separating audio"))
 
-        raw = self.separator.separate(
-            mix, work, tuple(absent),
+        return self.separator.separate(
+            mix, work, stems,
             progress_cb=separation_progress, cancel_cb=self.checkpoint,
         )
-        cache_dir = self.cache_root / full_digest
-        cache_dir.mkdir(parents=True, exist_ok=True)
-        for stem, raw_path in raw.items():
-            path = Path(raw_path)
-            if not path.is_file():
-                continue
-            produced.setdefault(stem, path)
-            # Cache only requested outputs; some six-source servers return all.
-            if stem in stems:
-                cache_path = cache_dir / f"{stem}{path.suffix or '.audio'}"
-                shutil.copyfile(path, cache_path)
-                cached.setdefault(stem, cache_path)
-        return produced
 
 
 @dataclass(frozen=True)
@@ -150,8 +110,6 @@ class BatchRunContext:
     selected: tuple[str, ...]
     skip_existing: bool
     event: threading.Event
-    cache_root: Path
-    cached_audio: dict[str, dict[str, Path]]
 
 
 def _now() -> str:
@@ -1033,14 +991,8 @@ class BatchManager:
                     progress=fraction, detail=detail,
                 )
 
-            def cache_hit() -> None:
-                with self.lock:
-                    counts = self.jobs[context.job_id]["counts"]
-                    counts["duplicate_audio_reused"] += 1
-
-            provider = BatchCachingStemProvider(
-                self.separator, context.cache_root, context.cached_audio,
-                lambda: self._checkpoint(context), progress, cache_hit,
+            provider = BatchStemProvider(
+                self.separator, lambda: self._checkpoint(context), progress,
             )
             result = self.exporter.export_minus_mix(
                 source, output_dir, context.selected,
@@ -1124,27 +1076,24 @@ class BatchManager:
         self._persist(force=True)
 
         try:
-            with tempfile.TemporaryDirectory(prefix="feedback_practice_batch_") as batch_temp:
-                context = BatchRunContext(
-                    job_id=job_id,
-                    input_root=Path(job["input_dir"]),
-                    output_root=Path(job["output_dir"]),
-                    selected=tuple(job["excluded_stems"]),
-                    skip_existing=bool(job["skip_existing"]),
-                    event=event,
-                    cache_root=Path(batch_temp) / "separation-cache",
-                    cached_audio={},
-                )
-                for index in range(len(job["items"])):
-                    with self.lock:
-                        item = self.jobs[job_id]["items"][index]
-                        if item["status"] != "queued":
-                            continue
-                    if event.is_set():
-                        break
-                    if not self._process_item(context, index):
-                        break
-                self._finish_run(context)
+            context = BatchRunContext(
+                job_id=job_id,
+                input_root=Path(job["input_dir"]),
+                output_root=Path(job["output_dir"]),
+                selected=tuple(job["excluded_stems"]),
+                skip_existing=bool(job["skip_existing"]),
+                event=event,
+            )
+            for index in range(len(job["items"])):
+                with self.lock:
+                    item = self.jobs[job_id]["items"][index]
+                    if item["status"] != "queued":
+                        continue
+                if event.is_set():
+                    break
+                if not self._process_item(context, index):
+                    break
+            self._finish_run(context)
         except Exception as exc:
             self.log.exception("minus_mix: batch worker failed")
             with self.lock:
