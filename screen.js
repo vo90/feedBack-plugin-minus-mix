@@ -890,7 +890,6 @@
       + '<span>' + (counts.queued || 0) + ' waiting</span>'
       + '<span>' + (counts.skipped || 0) + ' skipped</span>'
       + '<span>' + (counts.failed || 0) + ' failed</span>'
-      + '<span>' + (counts.duplicate_audio_reused || 0) + ' duplicate splits reused</span>'
       + ((counts.preview_failures || 0)
         ? '<span>' + counts.preview_failures + ' without preview</span>' : ''));
     if ($('pmx-batch-cancel')) $('pmx-batch-cancel').disabled = !active || job.status === 'canceling';

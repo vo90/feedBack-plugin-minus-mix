@@ -2,8 +2,14 @@
 
 ## Unreleased
 
+## 0.6.2 - 2026-09-04
+
 - Reworked the public README into a beginner-friendly installation, first-use,
   troubleshooting and technical reference guide.
+- Released each temporary separated stem before processing the next batch item
+  instead of retaining an unbounded cross-song reuse cache.
+- Retried a completed separation once when it unexpectedly omitted a requested
+  supported stem, with clearer attempt and temporary-disk diagnostics.
 
 ## 0.6.1 - 2026-08-20
 

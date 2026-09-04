@@ -288,10 +288,11 @@ Batch mode scans `.feedpak` and `.sloppak` files recursively. It can preserve
 the source folder structure or place every generated FeedPak directly in one
 output folder. Name collisions receive deterministic numbered names.
 
-Separation runs sequentially to avoid GPU-memory contention. Byte-identical
-full mixes in the same batch can reuse the requested temporary stem. The reuse
-cache is deleted when the job finishes. Recent actionable job history is
-bounded so large queues do not cause unbounded memory or status growth.
+Separation runs sequentially to avoid GPU-memory contention. Each song's
+temporary stem is kept only for that export and deleted before the next song,
+so temporary audio does not accumulate across a long batch. Recent actionable
+job history is bounded so large queues do not cause unbounded memory or status
+growth.
 
 ## Development
 
