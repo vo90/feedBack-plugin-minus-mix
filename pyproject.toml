@@ -1,6 +1,6 @@
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "--strict-markers --cov=batch --cov=exporter --cov=routes --cov=separator_client --cov=single --cov-report=term-missing:skip-covered --cov-fail-under=70"
+addopts = "--strict-markers --cov=batch --cov=exporter --cov=routes --cov=separator_client --cov=single --cov=reuse_batch --cov=reuse_export --cov=reuse_match --cov=reuse_routes --cov=reuse_state --cov=reuse_support --cov-report=term-missing:skip-covered --cov-fail-under=70"
 
 [tool.ruff]
 target-version = "py310"

@@ -1,0 +1,143 @@
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const ui = require('../reuse_screen.js');
+
+class Node {
+  constructor(tag = 'div') { this.tag = tag; this.value = ''; this.childNodes = []; this.listeners = {}; this.disabled = false; }
+  appendChild(node) { this.childNodes.push(node); return node; }
+  replaceChildren(...nodes) { this.childNodes = nodes; }
+  addEventListener(name, callback) { (this.listeners[name] ||= []).push(callback); }
+  fire(name) { if (this.disabled) return; for (const callback of this.listeners[name] || []) callback.call(this, {}); }
+  find(tag) { return this.childNodes.flatMap(node => [node, ...node.find('*')]).filter(node => tag === '*' || node.tag === tag); }
+}
+
+function environment(initial, responder) {
+  const ids = [...fs.readFileSync(require.resolve('../screen.html'), 'utf8').matchAll(/id="([^"]+)"/g)].map(match => match[1]);
+  const nodes = Object.fromEntries(ids.map(id => [id, new Node()]));
+  const document = { hidden: false, getElementById: id => nodes[id], createElement: tag => new Node(tag), addEventListener() {} };
+  const calls = [], storage = new Map();
+  ['old', 'fresh', 'output'].forEach(key => storage.set('minus_mix.reuse.' + key, 'C:/' + key));
+  let job = structuredClone(initial);
+  const controller = ui.mount({ document, storage: { getItem: key => storage.get(key), setItem: (key, value) => storage.set(key, value) },
+    request(path, options) {
+      calls.push({ path, options });
+      if (responder) { const value = responder(path, options, () => job, value => { job = value; }); if (value !== undefined) return value; }
+      if (path.includes('/latest')) return Promise.resolve({ job: structuredClone(job) });
+      if (path.endsWith('/choose')) { job = { ...job, groups: [], counts: { ...job.counts, ready: 1, review: 0 } }; }
+      return Promise.resolve(structuredClone(job));
+    }, pickDirectory: () => Promise.resolve('C:/changed') });
+  return { controller, nodes, calls, setJob(value) { job = value; } };
+}
+const node = (env, name) => env.nodes['pmx-reuse-' + name];
+const tick = () => new Promise(resolve => setImmediate(resolve));
+const reviewed = { id: 'job', status: 'ready', detail: 'Review proposed output', old_dir: 'C:/old', fresh_dir: 'C:/fresh', output_dir: 'C:/output',
+  counts: { total: 1, ready: 1, review: 0 }, items: [{ relative_path: 'song.feedpak', status: 'ready', title: '<untrusted title>' }], items_total: 1,
+  groups: [], resources: {}, source_errors: [] };
+const ambiguous = { ...reviewed, counts: { total: 1, ready: 0, review: 1 }, groups: [
+  { id: 'group', title: 'Song', targets_count: 1, candidates: [{ id: 'old/song.feedpak', relative_path: 'old/song.feedpak', full_sha256: 'a'.repeat(64) }] }] };
+
+async function main() {
+  assert.equal(ui.workerSetting('auto'), 'auto');
+  assert.equal(ui.workerSetting('16'), 16);
+  assert.equal(ui.workerSetting('17'), 'auto');
+  assert.equal(ui.jobActions(reviewed).apply, true);
+  assert.equal(ui.jobActions(ambiguous).apply, false);
+  assert.equal(ui.jobActions({ ...reviewed, status: 'interrupted' }).resume, true);
+  assert.equal(ui.jobActions({ ...reviewed, status: 'completed', counts: { done: 1 } }).resume, false);
+  assert.equal(ui.jobActions({ ...reviewed, status: 'running' }).cancel, true);
+  assert.equal(ui.jobActions({ ...reviewed, status: 'canceling' }).cancel, false);
+
+  for (const status of ['interrupted', 'canceled', 'failed']) {
+    const allDone = { ...reviewed, status, counts: { total: 1, done: 1, ready: 0, failed: 0, review: 0 } };
+    assert.equal(ui.jobActions(allDone).resume, true, status + ' receipts still need explicit verification and finalization');
+    assert.equal(ui.jobActions(allDone, true).resume, false, 'Busy jobs cannot resume');
+    assert.equal(ui.jobActions(allDone, false, true).resume, false, 'Dirty settings cannot resume');
+    assert.equal(ui.jobActions({ ...allDone, counts: { ...allDone.counts, review: 1 } }).resume, false, 'Unreviewed rows block resume');
+    assert.equal(ui.jobActions({ ...allDone, groups: ambiguous.groups }).resume, false, 'Unresolved choices block resume');
+    const recovery = environment(allDone);
+    await recovery.controller.show();
+    assert.equal(node(recovery, 'resume').disabled, false);
+    assert(recovery.calls.every(call => !call.options), 'Opening an interrupted job never resumes automatically');
+    node(recovery, 'resume').fire('click'); await tick();
+    assert.equal(recovery.calls.filter(call => call.path.endsWith('/apply')).length, 1, 'Resume explicitly asks the backend to verify existing output');
+    recovery.controller.hide();
+  }
+
+  const complete = environment({ ...reviewed, status: 'completed', counts: { total: 1, done: 1 } });
+  await complete.controller.show();
+  assert.equal(node(complete, 'resume').disabled, true, 'A normally completed job has nothing to finalize');
+  node(complete, 'resume').fire('click'); await tick();
+  assert(complete.calls.every(call => !call.options));
+  complete.controller.hide();
+
+  const warning = '<journal record could not be read>';
+  const journal = environment({ ...reviewed, journal_warning: warning });
+  await journal.controller.show();
+  assert.equal(node(journal, 'detail').textContent, reviewed.detail + ' Recovery warning: ' + warning);
+  assert.equal(node(journal, 'detail').childNodes.length, 0, 'Journal warnings are displayed as plain text');
+  node(journal, 'workers').value = '2'; node(journal, 'workers').fire('change');
+  assert(node(journal, 'detail').textContent.includes(warning), 'Dirty settings must not hide the recovery warning');
+  assert(journal.calls.every(call => !call.options));
+  journal.controller.hide();
+
+  const initial = environment(reviewed);
+  assert.equal(initial.calls.length, 0, 'Mount must not automatically scan or apply');
+  await initial.controller.show();
+  assert(initial.calls.every(call => !call.options), 'Opening the screen is read-only');
+  assert.equal(node(initial, 'bar').value, 1, 'A finished review has complete preview progress');
+  assert.equal(node(initial, 'apply').disabled, false);
+  assert.equal(node(initial, 'items').childNodes[0].childNodes[1].textContent, '<untrusted title>');
+  node(initial, 'workers').value = '4'; node(initial, 'workers').fire('change');
+  assert.equal(node(initial, 'apply').disabled, true, 'Changing settings invalidates Apply');
+
+  const choices = environment(ambiguous);
+  await choices.controller.show();
+  let select = node(choices, 'groups').find('select')[0];
+  let button = node(choices, 'groups').find('button')[0];
+  select.value = 'old/song.feedpak'; select.fire('change');
+  assert.equal(choices.calls.length, 1, 'Selecting an option does not submit it');
+  button.fire('click'); await tick();
+  assert.equal(choices.calls.filter(call => call.path.endsWith('/choose')).length, 1);
+  assert.equal(choices.calls.filter(call => call.path.endsWith('/apply')).length, 0, 'Saving a choice never applies automatically');
+  assert.equal(node(choices, 'apply').disabled, false);
+  node(choices, 'apply').fire('click'); await tick();
+  assert.equal(choices.calls.filter(call => call.path.endsWith('/apply')).length, 1);
+
+  const dirty = environment(ambiguous);
+  await dirty.controller.show();
+  select = node(dirty, 'groups').find('select')[0]; button = node(dirty, 'groups').find('button')[0];
+  select.value = 'old/song.feedpak'; select.fire('change');
+  node(dirty, 'old-browse').fire('click'); await tick();
+  assert.equal(select.disabled, true); assert.equal(button.disabled, true);
+  button.fire('click'); await tick();
+  assert.equal(dirty.calls.filter(call => call.options).length, 0, 'A dirty job cannot save choices or restore old folders');
+  assert.equal(node(dirty, 'old').value, 'C:/changed');
+
+  const errors = environment({ ...reviewed, source_errors: [{ relative_path: '<broken>', reason: '<error>' }] });
+  await errors.controller.show();
+  assert.equal(node(errors, 'errors-wrap').hidden, false);
+  assert.equal(node(errors, 'apply').disabled, false, 'Unrelated source errors do not block already reviewed valid rows');
+  assert.equal(node(errors, 'errors').childNodes[0].textContent, '<broken>: <error>');
+
+  let staleResolve, defer = false;
+  const stale = environment(ambiguous, (path, options) => {
+    if (!options && defer) return new Promise(resolve => { staleResolve = resolve; });
+  });
+  await stale.controller.show(); defer = true;
+  const pending = stale.controller.refresh();
+  select = node(stale, 'groups').find('select')[0]; button = node(stale, 'groups').find('button')[0];
+  select.value = 'old/song.feedpak'; select.fire('change'); button.fire('click'); await tick();
+  staleResolve(structuredClone(ambiguous)); await pending;
+  assert.equal(node(stale, 'groups').childNodes.length, 0, 'A stale poll cannot undo a saved choice');
+  assert.equal(node(stale, 'apply').disabled, false);
+
+  const callPaths = [];
+  const client = ui.createClient((path, options) => { callPaths.push({ path, options }); });
+  client.status('id/slash', 100); client.choose('id/slash', { group: '__skip__' }); client.apply('id/slash');
+  assert.equal(callPaths[0].path, '/reuse/id%2Fslash?offset=100&limit=100');
+  assert.equal(callPaths[1].options.body, '{"choices":{"group":"__skip__"}}');
+  assert.equal(callPaths[2].options.method, 'POST');
+  for (const env of [initial, choices, dirty, errors, stale]) env.controller.hide();
+  process.stdout.write('Reuse UI behavior checks passed\n');
+}
+main().catch(error => { console.error(error); process.exitCode = 1; });

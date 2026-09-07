@@ -17,6 +17,7 @@
   <div class="pmx-tabs" role="tablist" aria-label="Export mode">
     <button id="pmx-mode-single" class="pmx-tab active" type="button" role="tab" aria-selected="true" aria-controls="pmx-single-panel" tabindex="0">Single song</button>
     <button id="pmx-mode-batch" class="pmx-tab" type="button" role="tab" aria-selected="false" aria-controls="pmx-batch-panel" tabindex="-1">Batch folder</button>
+    <button id="pmx-mode-reuse" class="pmx-tab" type="button" role="tab" aria-selected="false" aria-controls="pmx-reuse-panel" tabindex="-1">Reuse No Guitar audio</button>
   </div>
 
   <div id="pmx-single-panel" role="tabpanel" aria-labelledby="pmx-mode-single">
@@ -173,6 +174,43 @@
       <p id="pmx-batch-updated" class="pmx-batch-updated" aria-live="off"></p>
       <p id="pmx-batch-items-note" class="pmx-help" hidden></p>
       <div id="pmx-batch-items" class="pmx-batch-items"></div>
+    </section>
+  </div>
+
+  <div id="pmx-reuse-panel" role="tabpanel" aria-labelledby="pmx-mode-reuse" hidden>
+    <section class="pmx-batch-intro">
+      <h2>Keep finished audio with your current charts</h2>
+      <p>Create new No Guitar FeedPaks using audio already saved in older MinusMix packages. Charts and other song files come from your current packages. Audio is copied without another separation or encode.</p>
+      <p class="pmx-help">Matching compares song identity and playable note timing. Older packages do not identify the original recording by audio hash, so review version choices before creating files.</p>
+    </section>
+    <section class="pmx-card"><div class="pmx-step">1</div><div class="pmx-content">
+      <label for="pmx-reuse-old">Existing No Guitar packages</label>
+      <div class="pmx-row"><input id="pmx-reuse-old" type="text" readonly placeholder="Choose the folder with finished No Guitar audio"><button id="pmx-reuse-old-browse" class="pmx-button pmx-secondary" type="button">Choose folder…</button></div>
+    </div></section>
+    <section class="pmx-card"><div class="pmx-step">2</div><div class="pmx-content">
+      <label for="pmx-reuse-fresh">Current original packages</label>
+      <div class="pmx-row"><input id="pmx-reuse-fresh" type="text" readonly placeholder="Choose the folder with your current charts"><button id="pmx-reuse-fresh-browse" class="pmx-button pmx-secondary" type="button">Choose folder…</button></div>
+    </div></section>
+    <section class="pmx-card"><div class="pmx-step">3</div><div class="pmx-content">
+      <label for="pmx-reuse-output">New output folder</label>
+      <div class="pmx-row"><input id="pmx-reuse-output" type="text" readonly placeholder="Choose a separate output folder"><button id="pmx-reuse-output-browse" class="pmx-button pmx-secondary" type="button">Choose folder…</button></div>
+      <p class="pmx-help">Subfolders are scanned. Both input collections stay unchanged, and existing output files are never overwritten.</p>
+      <label for="pmx-reuse-workers">Maximum parallel jobs</label>
+      <select id="pmx-reuse-workers"><option value="auto">Auto</option><option>1</option><option>2</option><option>3</option><option>4</option><option>5</option><option>6</option><option>7</option><option>8</option><option>9</option><option>10</option><option>11</option><option>12</option><option>13</option><option>14</option><option>15</option><option>16</option></select>
+      <p id="pmx-reuse-resources" class="pmx-help"></p>
+    </div></section>
+    <section class="pmx-summary">
+      <div><strong id="pmx-reuse-headline">Choose your three folders</strong><p id="pmx-reuse-detail"></p></div>
+      <div class="pmx-actions"><button id="pmx-reuse-scan" class="pmx-button pmx-secondary" type="button" disabled>Scan and review</button><button id="pmx-reuse-apply" class="pmx-button pmx-primary" type="button" disabled>Create reviewed FeedPaks</button><button id="pmx-reuse-resume" class="pmx-button pmx-primary" type="button" disabled hidden>Resume remaining files</button></div>
+    </section>
+    <div id="pmx-reuse-status" class="pmx-status" role="status" aria-live="polite"></div>
+    <section class="pmx-batch-progress">
+      <div class="pmx-progress-heading"><strong id="pmx-reuse-counts" aria-live="polite"></strong><div class="pmx-actions"><button id="pmx-reuse-refresh" class="pmx-button pmx-secondary" type="button">Refresh</button><button id="pmx-reuse-cancel" class="pmx-button pmx-danger" type="button" hidden>Cancel safely</button></div></div>
+      <progress id="pmx-reuse-bar" max="1" value="0" aria-label="Existing-audio reuse progress"></progress>
+      <div id="pmx-reuse-groups" aria-label="Audio versions requiring a choice"></div>
+      <div id="pmx-reuse-items" class="pmx-batch-items"></div>
+      <div class="pmx-reuse-pagination"><button id="pmx-reuse-previous" class="pmx-button pmx-secondary" type="button" disabled>Previous 100</button><span id="pmx-reuse-page"></span><button id="pmx-reuse-next" class="pmx-button pmx-secondary" type="button" disabled>Next 100</button></div>
+      <details id="pmx-reuse-errors-wrap" hidden><summary>Sources that could not be inspected</summary><div id="pmx-reuse-errors"></div></details>
     </section>
   </div>
 

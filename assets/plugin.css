@@ -166,6 +166,13 @@
 .practice-mix-exporter .pmx-batch-item div { min-width: 0; overflow-wrap: anywhere; }
 .practice-mix-exporter .pmx-batch-item small { display: block; color: #94a3b8; }
 .practice-mix-exporter .pmx-details { margin-top: 1rem; color: #94a3b8; }
+.practice-mix-exporter [hidden] { display: none !important; }
+.practice-mix-exporter .pmx-tabs { flex-wrap: wrap; }
+.practice-mix-exporter #pmx-reuse-workers { max-width: 14rem; }
+.practice-mix-exporter .pmx-reuse-choice { padding: .8rem; margin-bottom: .8rem; border: 1px solid #94763c; border-radius: 8px; }
+.practice-mix-exporter .pmx-reuse-choice select { margin: .4rem 0; }
+.practice-mix-exporter .pmx-reuse-pagination { display: flex; align-items: center; justify-content: space-between; gap: .5rem; margin-top: .8rem; flex-wrap: wrap; }
+.practice-mix-exporter #pmx-reuse-errors { max-height: 220px; overflow: auto; overflow-wrap: anywhere; }
 .practice-mix-exporter .pmx-details summary { color: #cbd5e1; cursor: pointer; font-weight: 650; }
 @media (max-width: 650px) {
   .practice-mix-exporter { padding-inline: .85rem; }

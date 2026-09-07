@@ -117,6 +117,11 @@ class MinusMixAPI:
         self.get_dlc_dir = get_dlc_dir
         self.meta_db = meta_db
         self.operation_start_lock = threading.RLock()
+        self.reuse_manager = None
+
+    def _require_reuse_idle(self):
+        if self.reuse_manager is not None and self.reuse_manager.is_active():
+            raise HTTPException(409, "Wait for existing-audio reuse to finish or cancel it first")
 
     @staticmethod
     def _batch_options(body: dict) -> BatchRequestOptions:
@@ -287,6 +292,7 @@ class MinusMixAPI:
         source_path = self._resolve_source(body.get("filename"))
         try:
             with self.operation_start_lock:
+                self._require_reuse_idle()
                 if self.batch_manager.is_active():
                     raise self.single_module.SingleExportError(
                         "wait for the active MinusMix batch to finish or cancel it first"
@@ -294,6 +300,8 @@ class MinusMixAPI:
                 return self.single_manager.start(source_path, output_dir, excluded)
         except (self.exporter.ExportError, self.single_module.SingleExportError) as exc:
             raise HTTPException(400, str(exc)) from exc
+        except HTTPException:
+            raise
         except PermissionError as exc:
             raise HTTPException(403, "the app cannot write to the chosen output folder") from exc
         except Exception as exc:
@@ -374,6 +382,7 @@ class MinusMixAPI:
         self._require_loopback(request, "batch conversion is only available on this computer")
         try:
             with self.operation_start_lock:
+                self._require_reuse_idle()
                 if self.single_manager.is_active():
                     raise self.batch_module.BatchError(
                         "wait for the active single-song export to finish or cancel it first"
@@ -446,4 +455,17 @@ def setup(app: FastAPI, context: dict) -> None:
         meta_db=context.get("meta_db"),
     )
     api.register(app)
+    reuse_module = context["load_sibling"]("reuse_batch")
+    reuse_match = context["load_sibling"]("reuse_match")
+    api.reuse_manager = reuse_module.ReuseManager(
+        match=reuse_match,
+        packing=context["load_sibling"]("reuse_export"),
+        exporter=exporter,
+        support=context["load_sibling"]("reuse_support"),
+        config_dir=config_dir,
+        log=log,
+    )
+    context["load_sibling"]("reuse_routes").register(
+        app, api=api, manager=api.reuse_manager, error_type=reuse_match.ReuseError,
+    )
     log.info("minus_mix: routes registered")

@@ -91,6 +91,8 @@
   }
   var window = root;
   var document = root.document;
+  var reuseScriptBase = document.currentScript && document.currentScript.src;
+  var reuseController = null, reuseLoading = null;
   if (window.__minusMixLoaded) return;
   window.__minusMixLoaded = true;
 
@@ -534,21 +536,48 @@
   }
 
   function setMode(mode) {
-    var batch = mode === 'batch';
-    if ($('pmx-single-panel')) $('pmx-single-panel').hidden = batch;
-    if ($('pmx-batch-panel')) $('pmx-batch-panel').hidden = !batch;
-    if ($('pmx-mode-single')) {
-      $('pmx-mode-single').classList.toggle('active', !batch);
-      $('pmx-mode-single').setAttribute('aria-selected', batch ? 'false' : 'true');
-      $('pmx-mode-single').setAttribute('tabindex', batch ? '-1' : '0');
-    }
-    if ($('pmx-mode-batch')) {
-      $('pmx-mode-batch').classList.toggle('active', batch);
-      $('pmx-mode-batch').setAttribute('aria-selected', batch ? 'true' : 'false');
-      $('pmx-mode-batch').setAttribute('tabindex', batch ? '0' : '-1');
-    }
-    try { localStorage.setItem(STORAGE_MODE, batch ? 'batch' : 'single'); } catch (_) {}
+    if (['single', 'batch', 'reuse'].indexOf(mode) < 0) mode = 'single';
+    ['single', 'batch', 'reuse'].forEach(function (name) {
+      var selected = name === mode, tab = $('pmx-mode-' + name);
+      if ($('pmx-' + name + '-panel')) $('pmx-' + name + '-panel').hidden = !selected;
+      if (tab) {
+        tab.classList.toggle('active', selected);
+        tab.setAttribute('aria-selected', selected ? 'true' : 'false');
+        tab.setAttribute('tabindex', selected ? '0' : '-1');
+      }
+    });
+    if ($('pmx-engine')) $('pmx-engine').hidden = mode === 'reuse';
+    if (mode === 'reuse') loadReuseScreen();
+    else if (reuseController) reuseController.hide();
+    try { localStorage.setItem(STORAGE_MODE, mode); } catch (_) {}
     renderEngineStatus();
+  }
+
+  function loadReuseScreen() {
+    if (reuseController) { reuseController.show(); return; }
+    if (!reuseLoading) {
+      reuseLoading = new Promise(function (resolve, reject) {
+        if (window.MinusMixReuse) { resolve(); return; }
+        var script = document.createElement('script');
+        var base = new URL(reuseScriptBase || API + '/screen.js', window.location.href);
+        var target = new URL('reuse_screen.js', base); target.search = base.search;
+        script.src = target.href;
+        script.onload = resolve;
+        script.onerror = function () { reject(new Error('Could not load the audio reuse screen. Refresh MinusMix and try again.')); };
+        document.head.appendChild(script);
+      });
+    }
+    reuseLoading.then(function () {
+      reuseController = window.MinusMixReuse.mount({ document: document, request: jsonFetch,
+        storage: window.localStorage, pickDirectory: window.feedBackDesktop
+          && typeof window.feedBackDesktop.pickDirectory === 'function'
+          ? function () { return window.feedBackDesktop.pickDirectory(); } : null });
+      if (!$('pmx-reuse-panel').hidden) reuseController.show();
+    }).catch(function (error) {
+      reuseLoading = null;
+      $('pmx-reuse-status').className = 'pmx-status error';
+      $('pmx-reuse-status').textContent = error.message;
+    });
   }
 
   function showBatchStatus(kind, text) {
@@ -1068,7 +1097,7 @@
       $('pmx-batch-layout-preserve').checked = true;
     }
     updateBatchLayoutHelp();
-    setMode(savedMode === 'batch' ? 'batch' : 'single');
+    setMode(savedMode);
     $('pmx-source').addEventListener('change', function () { chooseSource(this.value); });
     $('pmx-refresh').addEventListener('click', function () { loadSources(); refreshStatus(); });
     $('pmx-engine-refresh').addEventListener('click', refreshStatus);
@@ -1077,14 +1106,15 @@
     $('pmx-single-cancel').addEventListener('click', cancelSingleExport);
     $('pmx-mode-single').addEventListener('click', function () { setMode('single'); });
     $('pmx-mode-batch').addEventListener('click', function () { setMode('batch'); });
+    $('pmx-mode-reuse').addEventListener('click', function () { setMode('reuse'); });
     document.querySelector('.pmx-tabs').addEventListener('keydown', function (event) {
-      var tabs = [$('pmx-mode-single'), $('pmx-mode-batch')];
+      var tabs = [$('pmx-mode-single'), $('pmx-mode-batch'), $('pmx-mode-reuse')];
       var current = tabs.indexOf(document.activeElement);
       if (current < 0) return;
       var next = nextTabIndex(current, event.key, tabs.length);
       if (next === null) return;
       event.preventDefault();
-      setMode(next === 1 ? 'batch' : 'single');
+      setMode(['single', 'batch', 'reuse'][next]);
       tabs[next].focus();
     });
     $('pmx-batch-input-browse').addEventListener('click', function () {
@@ -1137,12 +1167,14 @@
       // active class. Deferring one tick makes resume reliable in both orders.
       setTimeout(function () {
         if (!screenIsVisible()) return;
+        if ($('pmx-reuse-panel') && !$('pmx-reuse-panel').hidden) loadReuseScreen();
         refreshStatus();
         loadLatestSingleExport();
         loadLatestBatch();
         if (state.batchBusy && state.batchScanJobId) pollBatchScan();
       }, 0);
     } else {
+      if (reuseController) reuseController.hide();
       pauseScreenPolling();
     }
   }
@@ -1152,6 +1184,7 @@
       pauseScreenPolling();
       return;
     }
+    if ($('pmx-reuse-panel') && !$('pmx-reuse-panel').hidden) loadReuseScreen();
     refreshStatus();
     loadLatestSingleExport();
     loadLatestBatch();

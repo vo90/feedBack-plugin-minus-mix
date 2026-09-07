@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Added a separate reviewed batch job to reuse finished No Guitar audio with
+  freshly converted or repaired charts, without separation or audio encoding.
+- Added repair-tolerant version/timeline matching, grouped recording choices,
+  bounded workers, exact member verification, no-overwrite publication and
+  resumable completion receipts. Both source folder trees remain read-only.
+
 ## 0.6.2 - 2026-09-04
 
 - Reworked the public README into a beginner-friendly installation, first-use,

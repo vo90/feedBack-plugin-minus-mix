@@ -1,6 +1,7 @@
 """HTTP-route composition and host API contract tests."""
 from __future__ import annotations
 
+import importlib
 from types import SimpleNamespace
 
 import pytest
@@ -32,7 +33,7 @@ def _app(tmp_path, *, meta_db=None) -> FastAPI:
     app = FastAPI()
     routes.setup(app, {
         "config_dir": str(tmp_path),
-        "load_sibling": modules.__getitem__,
+        "load_sibling": lambda name: modules.get(name) or importlib.import_module(name),
         "log": log,
         "meta_db": meta_db,
     })
@@ -120,4 +121,10 @@ def test_route_composer_registers_the_public_contract(tmp_path):
         (f"{routes.API}/batch/latest", "GET"),
         (f"{routes.API}/batch/{{job_id}}", "GET"),
         (f"{routes.API}/batch/{{job_id}}/cancel", "POST"),
+        (f"{routes.API}/reuse/scan", "POST"),
+        (f"{routes.API}/reuse/latest", "GET"),
+        (f"{routes.API}/reuse/{{job_id}}", "GET"),
+        (f"{routes.API}/reuse/{{job_id}}/choose", "POST"),
+        (f"{routes.API}/reuse/{{job_id}}/apply", "POST"),
+        (f"{routes.API}/reuse/{{job_id}}/cancel", "POST"),
     }
