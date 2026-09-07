@@ -28,15 +28,26 @@ def checked_path(root, relative, error, *, exists=True):
     parts = relative.split("/")
     if any(part in ("", ".", "..") for part in parts):
         raise error("Unsafe relative package path.")
-    target = Path(root)
-    for part in parts:
-        target = target / part
-        if target.is_symlink() or getattr(target, "is_junction", lambda: False)():
-            raise error("Linked source/output paths are not followed.")
-    resolved = target.resolve()
-    if not inside(resolved, root) or (exists and not resolved.is_file()):
-        raise error("Package moved outside its folder or is unavailable.")
-    return resolved
+    for attempt in range(2):
+        target = Path(root)
+        for part in parts:
+            target = target / part
+            if target.is_symlink() or getattr(target, "is_junction", lambda: False)():
+                raise error("Linked source/output paths are not followed.")
+        resolved = target.resolve()
+        if inside(resolved, root):
+            if exists and not resolved.is_file():
+                break
+            return resolved
+        # On Windows, another worker creating a missing output parent can
+        # change PATH_NOT_FOUND to FILE_NOT_FOUND inside non-strict resolve(),
+        # leaving its extended prefix intact. Recheck every component once;
+        # never strip namespaces or accept a persistent containment mismatch.
+        if (attempt or exists or os.name != "nt"
+                or not str(resolved).startswith("\\\\?\\")
+                or str(root).startswith("\\\\?\\")):
+            break
+    raise error("Package moved outside its folder or is unavailable.")
 
 
 def roots(old_dir, fresh_dir, output_dir, error):
