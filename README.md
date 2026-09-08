@@ -49,8 +49,15 @@ in MinusMix. Choose three separate, non-overlapping folders: your existing Minus
 FeedPaks, the fresh ordinary FeedPaks, and a new output folder. Scan and review the
 matches, then create the new copies. Both input folders remain read-only.
 
-Both input folders are scanned recursively. Output preserves subfolders relative
-to the selected **Current original packages** folder. A repeat scan verifies
+Both input folders are scanned recursively. **Output folder structure** defaults
+to **Preserve source subfolders**, keeping subfolders relative to the selected
+**Current original packages** folder. For example, `Artist/Album/Song.feedpak`
+becomes `Artist/Album/Song (No Guitar).feedpak` inside the output folder. Choose
+**Single output folder** to put every resulting FeedPak directly in that folder.
+Clashing filenames receive numbered suffixes in the preview. Changing this choice
+requires a new scan; it does not move files created with an earlier layout.
+
+A repeat scan with the same layout verifies
 existing outputs and counts exact matches as **already complete**. Only remaining
 ready files need Apply; the summary reports created files separately from already
 complete ones. Different or damaged existing outputs are reported as conflicts

@@ -302,7 +302,9 @@ class ReuseManager:
                 self.job.update(status="failed", detail=f"Job did not start: checkpoint could not be saved ({exc}).")
             raise self.match.ReuseError("Job did not start because its checkpoint could not be saved.") from exc
 
-    def start_scan(self, *, old_dir, fresh_dir, output_dir, workers="auto"):
+    def start_scan(self, *, old_dir, fresh_dir, output_dir, workers="auto", output_layout="preserve"):
+        if output_layout not in ("preserve", "flat"):
+            raise self.match.ReuseError("Output layout must be preserve or flat.")
         roots = self.support.roots(old_dir, fresh_dir, output_dir, self.match.ReuseError)
         with self.lock:
             if self.is_active():
@@ -321,6 +323,7 @@ class ReuseManager:
             self.job = {"id": uuid.uuid4().hex, "policy": self.match.POLICY,
                         "status": "scanning", "created_at": time.time(), "detail": "Reading folders",
                         "old_dir": str(roots[0]), "fresh_dir": str(roots[1]), "output_dir": str(roots[2]),
+                        "output_layout": output_layout,
                         "items": [], "groups": {}, "source_errors": [], "resources": {},
                         "input_packages_total": 0,
                         "_donors": {}, "_root_ids": [self.match.signature(root)[:2] for root in roots],
@@ -581,7 +584,8 @@ class ReuseManager:
             if row["status"] in ("blocked", "skipped"):
                 continue
             relative = Path(row["relative_path"])
-            wanted = self.exporter.desired_output_path(relative.parent, relative,
+            parent = relative.parent if self.job["output_layout"] == "preserve" else Path(".")
+            wanted = self.exporter.desired_output_path(parent, relative,
                                                        excluded_stems=row["excluded_stems"])
             # Leave room for collision numbers and .feedpak on Windows, even
             # when a valid custom stem label or source name uses surrogate pairs.

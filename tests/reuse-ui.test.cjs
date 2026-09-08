@@ -16,12 +16,13 @@ class Node {
   find(tag) { return this.childNodes.flatMap(node => [node, ...node.find('*')]).filter(node => tag === '*' || node.tag === tag); }
 }
 
-function environment(initial, responder) {
+function environment(initial, responder, preferences = {}) {
   const ids = [...fs.readFileSync(require.resolve('../screen.html'), 'utf8').matchAll(/id="([^"]+)"/g)].map(match => match[1]);
   const nodes = Object.fromEntries(ids.map(id => [id, new Node()]));
   const document = { hidden: false, getElementById: id => nodes[id], createElement: tag => new Node(tag), addEventListener() {} };
   const calls = [], storage = new Map();
   ['old', 'fresh', 'output'].forEach(key => storage.set('minus_mix.reuse.' + key, 'C:/' + key));
+  Object.entries(preferences).forEach(([key, value]) => storage.set('minus_mix.reuse.' + key, value));
   let job = structuredClone(initial);
   const controller = ui.mount({ document, storage: { getItem: key => storage.get(key), setItem: (key, value) => storage.set(key, value) },
     request(path, options) {
@@ -31,7 +32,7 @@ function environment(initial, responder) {
       if (path.endsWith('/choose')) { job = { ...job, groups: [], counts: { ...job.counts, ready: 1, review: 0 } }; }
       return Promise.resolve(structuredClone(job));
     }, pickDirectory: () => Promise.resolve('C:/changed') });
-  return { controller, nodes, calls, setJob(value) { job = value; } };
+  return { controller, nodes, calls, storage, setJob(value) { job = value; } };
 }
 const node = (env, name) => env.nodes['pmx-reuse-' + name];
 const tick = () => new Promise(resolve => setImmediate(resolve));
@@ -45,6 +46,81 @@ const ambiguous = { ...reviewed, counts: { total: 1, ready: 0, review: 1 }, grou
     candidates: [{ id: 'old/song.feedpak', relative_path: 'old/song.feedpak', full_sha256: 'a'.repeat(64) }] }] };
 const phaseProgress = { phase: 'reading_existing', label: 'Reading existing mixes', processed: 0, total: 1,
   elapsed_seconds: 0, files_per_second: null, eta_seconds: null, fraction: 0, active: true };
+
+async function layoutChecks() {
+  assert.equal(ui.layoutSetting(undefined), 'preserve');
+  assert.equal(ui.layoutSetting('preserve'), 'preserve');
+  assert.equal(ui.layoutSetting('flat'), 'flat');
+  assert.equal(ui.layoutSetting('invalid'), 'preserve');
+
+  const fresh = environment(null);
+  await fresh.controller.show();
+  assert.equal(node(fresh, 'layout').value, 'preserve', 'Preserve folders is the initial default');
+  assert.equal(node(fresh, 'layout-help').textContent,
+    'Recreate subfolders from Current original packages inside the output folder.');
+  node(fresh, 'layout').value = 'flat'; node(fresh, 'layout').fire('change');
+  assert.equal(fresh.storage.get('minus_mix.reuse.output_layout'), 'flat');
+  assert(node(fresh, 'layout-help').textContent.includes('directly in the output folder'));
+  assert(fresh.calls.every(call => !call.options), 'Selecting a layout never starts work');
+  fresh.controller.hide();
+
+  const saved = environment(null, null, { output_layout: 'flat' });
+  await saved.controller.show();
+  assert.equal(node(saved, 'layout').value, 'flat', 'Saved layout is used without a reviewed job');
+  saved.controller.hide();
+
+  for (const [job, preference, expected] of [
+    [reviewed, 'flat', 'preserve'],
+    [{ ...reviewed, output_layout: 'flat' }, 'preserve', 'flat'],
+  ]) {
+    const restore = environment(job, null, { output_layout: preference });
+    await restore.controller.show();
+    assert.equal(node(restore, 'layout').value, expected,
+      'The reviewed job layout takes precedence; older jobs used preserve');
+    assert.equal(node(restore, 'apply').disabled, false);
+    restore.controller.hide();
+  }
+
+  for (const status of ['ready', 'interrupted']) {
+    const dirty = environment({ ...reviewed, status });
+    await dirty.controller.show();
+    node(dirty, 'layout').value = 'flat'; node(dirty, 'layout').fire('change');
+    assert.equal(node(dirty, 'apply').disabled, true);
+    assert.equal(node(dirty, 'resume').disabled, true);
+    assert(node(dirty, 'detail').textContent.includes('Scan again'));
+    await dirty.controller.refresh();
+    assert.equal(node(dirty, 'layout').value, 'flat', 'A status refresh preserves an unsaved layout choice');
+    node(dirty, 'apply').fire('click'); node(dirty, 'resume').fire('click'); await tick();
+    assert(dirty.calls.every(call => !call.options), 'A new structure needs an explicit rescan before Apply or Resume');
+    dirty.controller.hide();
+  }
+
+  const scanned = environment(reviewed, (path, options, getJob, setJob) => {
+    if (path.endsWith('/scan')) {
+      const payload = JSON.parse(options.body);
+      assert.deepEqual(payload, { old_dir: 'C:/old', fresh_dir: 'C:/fresh', output_dir: 'C:/output',
+        workers: 'auto', output_layout: 'flat' });
+      const next = { ...getJob(), ...payload };
+      setJob(next); return Promise.resolve(next);
+    }
+  });
+  await scanned.controller.show();
+  node(scanned, 'layout').value = 'flat'; node(scanned, 'layout').fire('change');
+  node(scanned, 'scan').fire('click');
+  assert.equal(node(scanned, 'layout').disabled, true, 'The layout is locked while a request is pending');
+  await tick();
+  assert.equal(node(scanned, 'layout').value, 'flat');
+  assert.equal(node(scanned, 'apply').disabled, false, 'A new reviewed scan authorizes its chosen output structure');
+  assert.equal(scanned.calls.filter(call => call.path.endsWith('/scan')).length, 1);
+  scanned.controller.hide();
+
+  for (const status of ['scanning', 'running', 'canceling']) {
+    const active = environment({ ...reviewed, status, output_layout: 'flat' });
+    await active.controller.show();
+    assert.equal(node(active, 'layout').disabled, true, status + ' jobs lock their reviewed structure');
+    active.controller.hide();
+  }
+}
 
 async function progressChecks() {
   const discovery = environment({ ...reviewed, status: 'scanning', phase_progress: {
@@ -144,6 +220,7 @@ async function progressChecks() {
 }
 
 async function main() {
+  await layoutChecks();
   await progressChecks();
   assert.equal(ui.workerSetting('auto'), 'auto');
   assert.equal(ui.workerSetting('16'), 16);

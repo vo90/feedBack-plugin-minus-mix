@@ -195,7 +195,10 @@
     <section class="pmx-card"><div class="pmx-step">3</div><div class="pmx-content">
       <label for="pmx-reuse-output">New output folder</label>
       <div class="pmx-row"><input id="pmx-reuse-output" type="text" readonly placeholder="Choose a separate output folder"><button id="pmx-reuse-output-browse" class="pmx-button pmx-secondary" type="button">Choose folder…</button></div>
-      <p class="pmx-help">Both input folders are scanned recursively. Output preserves subfolders relative to Current original packages. Inputs stay unchanged; verified existing outputs are counted as already complete and never overwritten.</p>
+      <p class="pmx-help">Both input folders are scanned recursively. Inputs stay unchanged; verified existing outputs are counted as already complete and never overwritten.</p>
+      <label for="pmx-reuse-layout">Output folder structure</label>
+      <select id="pmx-reuse-layout" aria-describedby="pmx-reuse-layout-help"><option value="preserve" selected>Preserve source subfolders (default)</option><option value="flat">Single output folder</option></select>
+      <p id="pmx-reuse-layout-help" class="pmx-help">Recreate subfolders from Current original packages inside the output folder.</p>
       <label for="pmx-reuse-workers">Maximum parallel jobs</label>
       <select id="pmx-reuse-workers"><option value="auto">Auto</option><option>1</option><option>2</option><option>3</option><option>4</option><option>5</option><option>6</option><option>7</option><option>8</option><option>9</option><option>10</option><option>11</option><option>12</option><option>13</option><option>14</option><option>15</option><option>16</option></select>
       <p id="pmx-reuse-resources" class="pmx-help"></p>

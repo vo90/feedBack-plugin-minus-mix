@@ -36,9 +36,12 @@ def register(app, *, api, manager, error_type):
         workers = body.get("workers", "auto")
         if workers != "auto" and (type(workers) is not int or not 1 <= workers <= 16):
             raise HTTPException(400, "Workers must be Auto or a whole number from 1 to 16")
+        output_layout = body.get("output_layout", "preserve")
+        if output_layout not in ("preserve", "flat"):
+            raise HTTPException(400, "Output layout must be preserve or flat")
         with api.operation_start_lock:
             idle_exports()
-            return invoke(manager.start_scan, **folders, workers=workers)
+            return invoke(manager.start_scan, **folders, workers=workers, output_layout=output_layout)
 
     @app.get(prefix + "/reuse/latest")
     def reuse_latest(request: Request, offset: int = Query(0, ge=0, le=50000),

@@ -15,9 +15,7 @@ def validate(data, policy, limit, output_limit=50_000):
         raise ValueError("Checkpoint policy/shape is unsupported.")
     if not re.fullmatch(r"[a-f0-9]{32}", str(data.get("id", ""))) or data.get("status") not in STATUSES:
         raise ValueError("Checkpoint identity/status is invalid.")
-    for key in ("old_dir", "fresh_dir", "output_dir"):
-        if not isinstance(data.get(key), str) or not Path(data[key]).is_absolute():
-            raise ValueError("Checkpoint folders are invalid.")
+    _validate_folders(data)
     for key, expected in (("_donors", dict), ("resources", dict), ("source_errors", list)):
         if not isinstance(data.get(key), expected) or len(data[key]) > limit:
             raise ValueError("Checkpoint collection is invalid or oversized.")
@@ -52,6 +50,16 @@ def validate(data, policy, limit, output_limit=50_000):
         _validate_variant(row, data, outputs)
     _validate_groups(data)
     return data
+
+
+def _validate_folders(data):
+    # Earlier previews always preserved the fresh input's folders. Keep their
+    # reviewed output paths and completion receipts valid when restoring them.
+    if data.setdefault("output_layout", "preserve") not in ("preserve", "flat"):
+        raise ValueError("Checkpoint output layout is invalid.")
+    for key in ("old_dir", "fresh_dir", "output_dir"):
+        if not isinstance(data.get(key), str) or not Path(data[key]).is_absolute():
+            raise ValueError("Checkpoint folders are invalid.")
 
 
 def _validate_groups(data):

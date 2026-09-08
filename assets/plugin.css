@@ -170,6 +170,7 @@
 .practice-mix-exporter [hidden] { display: none !important; }
 .practice-mix-exporter .pmx-tabs { flex-wrap: wrap; }
 .practice-mix-exporter #pmx-reuse-workers { max-width: 14rem; }
+.practice-mix-exporter #pmx-reuse-layout { max-width: 28rem; }
 .practice-mix-exporter .pmx-reuse-phase { margin-top: .75rem; }
 .practice-mix-exporter .pmx-reuse-phase-heading { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: .35rem 1rem; }
 .practice-mix-exporter #pmx-reuse-phase-count { color: #cbd5e1; font-size: .85rem; font-variant-numeric: tabular-nums; }

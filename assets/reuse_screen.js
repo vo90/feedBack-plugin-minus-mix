@@ -8,6 +8,8 @@
     return Number.isInteger(number) && number >= 1 && number <= 16 ? number : 'auto';
   }
 
+  function layoutSetting(value) { return value === 'flat' ? 'flat' : 'preserve'; }
+
   function jobActions(job, busy, dirty) {
     job = job || {};
     var active = ['scanning', 'running', 'canceling'].indexOf(job.status) >= 0;
@@ -84,7 +86,7 @@
     }
     function folders() {
       return { old_dir: $('old').value, fresh_dir: $('fresh').value, output_dir: $('output').value,
-        workers: workerSetting($('workers').value) };
+        workers: workerSetting($('workers').value), output_layout: layoutSetting($('layout').value) };
     }
     function updateControls() {
       var actions = jobActions(job, busy, dirty), selected = folders();
@@ -96,6 +98,7 @@
       $('cancel').hidden = !actions.active;
       ['old', 'fresh', 'output'].forEach(function (name) { $(name + '-browse').disabled = busy || actions.active; });
       $('workers').disabled = busy || actions.active;
+      $('layout').disabled = busy || actions.active;
       $('refresh').disabled = busy || pollBusy;
       $('previous').disabled = busy || pollBusy || offset <= 0;
       $('next').disabled = busy || pollBusy || !job || offset + 100 >= Number(job.items_total || 0);
@@ -182,10 +185,13 @@
     function render() {
       var counts = (job && job.counts) || {};
       text('headline', job ? 'Audio reuse — ' + job.status : 'Choose your three folders');
-      var detail = dirty ? 'Folder or worker settings changed. Scan again before creating files.'
+      var detail = dirty ? 'Folder, output structure or worker settings changed. Scan again before creating files.'
         : job ? job.detail || '' : 'Scan compares current charts with existing MinusMix packages and reads their removed-stem variants. Review the matches before creating files.';
       if (job && job.journal_warning) detail += ' Recovery warning: ' + job.journal_warning;
       text('detail', detail);
+      text('layout-help', layoutSetting($('layout').value) === 'flat'
+        ? 'Put every FeedPak directly in the output folder. Duplicate filenames receive a numbered suffix in the preview.'
+        : 'Recreate subfolders from Current original packages inside the output folder.');
       var totals = ['Input song packages: ' + Number(job && job.input_packages_total || 0),
         'Output variants: ' + Number(job && job.output_variants_total || 0)];
       text('counts', totals.concat(['ready', 'review', 'blocked', 'created', 'existing', 'failed', 'skipped']
@@ -229,6 +235,8 @@
         [['old', 'old_dir'], ['fresh', 'fresh_dir'], ['output', 'output_dir']].forEach(function (pair) {
           if (job[pair[1]]) $(pair[0]).value = job[pair[1]];
         });
+        // The displayed structure must agree with the reviewed output paths, including older jobs.
+        $('layout').value = layoutSetting(job.output_layout);
       }
       render();
     }
@@ -272,6 +280,10 @@
     $('workers').addEventListener('change', function () {
       save('workers', $('workers').value); dirty = true; render();
     });
+    $('layout').value = layoutSetting(saved('output_layout', 'preserve'));
+    $('layout').addEventListener('change', function () {
+      save('output_layout', $('layout').value); dirty = true; render();
+    });
     $('scan').addEventListener('click', function () {
       if ($('scan').disabled) return;
       var options = folders(); offset = 0;
@@ -299,7 +311,7 @@
     return panel.__reuseController;
   }
 
-  var exported = { workerSetting: workerSetting, jobActions: jobActions, createClient: createClient, mount: mount };
+  var exported = { workerSetting: workerSetting, layoutSetting: layoutSetting, jobActions: jobActions, createClient: createClient, mount: mount };
   if (typeof module !== 'undefined' && module.exports) module.exports = exported;
   else root.MinusMixReuse = exported;
 })(typeof window !== 'undefined' ? window : globalThis);

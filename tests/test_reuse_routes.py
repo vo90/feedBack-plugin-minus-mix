@@ -76,7 +76,7 @@ def test_scan_choices_and_apply_are_separate_explicit_actions():
     with TestClient(app, client=("::1", 1000)) as client:
         payload = {"old_dir": "C:/old", "fresh_dir": "C:/fresh", "output_dir": "C:/new", "workers": 16}
         assert client.post(routes.API + "/reuse/scan", json=payload).status_code == 202
-        assert manager.calls == [("scan", payload)]
+        assert manager.calls == [("scan", {**payload, "output_layout": "preserve"})]
         assert client.post(routes.API + "/reuse/new-job/choose", json={"choices": {"group": "folder/source.feedpak"}}).status_code == 200
         assert all(call[0] != "apply" for call in manager.calls)
         assert client.post(routes.API + "/reuse/new-job/apply").status_code == 202
@@ -90,6 +90,27 @@ def test_worker_values_are_validated_before_scheduling(workers):
     with TestClient(app, client=("127.0.0.1", 1000)) as client:
         response = client.post(routes.API + "/reuse/scan", json={
             "old_dir": "C:/old", "fresh_dir": "C:/fresh", "output_dir": "C:/new", "workers": workers})
+    assert response.status_code == 400 and not manager.calls
+
+
+@pytest.mark.parametrize("layout", ["preserve", "flat"])
+def test_output_layout_is_bound_to_scan_request(layout):
+    app, manager, _ = app_and_manager()
+    payload = {"old_dir": "C:/old", "fresh_dir": "C:/fresh", "output_dir": "C:/new",
+               "workers": "auto", "output_layout": layout}
+    with TestClient(app, client=("127.0.0.1", 1000)) as client:
+        response = client.post(routes.API + "/reuse/scan", json=payload)
+    assert response.status_code == 202
+    assert manager.calls == [("scan", payload)]
+
+
+@pytest.mark.parametrize("layout", [None, True, 2, "", "folders", [], {}])
+def test_output_layout_is_validated_before_scheduling(layout):
+    app, manager, _ = app_and_manager()
+    with TestClient(app, client=("127.0.0.1", 1000)) as client:
+        response = client.post(routes.API + "/reuse/scan", json={
+            "old_dir": "C:/old", "fresh_dir": "C:/fresh", "output_dir": "C:/new",
+            "output_layout": layout})
     assert response.status_code == 400 and not manager.calls
 
 

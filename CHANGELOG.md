@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Added an audio-reuse output folder choice: preserve Current original packages
+  subfolders by default, or place all resulting FeedPaks in a single folder.
+  Previews reserve distinct filenames and retain existing-output verification.
 - Serve the audio-reuse helper from the host-supported plugin assets directory.
 - Added a separate reviewed batch job to reuse finished MinusMix audio with
   freshly converted or repaired charts, without separation or audio encoding.
