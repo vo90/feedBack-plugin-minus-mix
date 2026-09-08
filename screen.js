@@ -560,7 +560,7 @@
         if (window.MinusMixReuse) { resolve(); return; }
         var script = document.createElement('script');
         var base = new URL(reuseScriptBase || API + '/screen.js', window.location.href);
-        var target = new URL('reuse_screen.js', base); target.search = base.search;
+        var target = new URL('assets/reuse_screen.js', base); target.search = base.search;
         script.src = target.href;
         script.onload = resolve;
         script.onerror = function () { reject(new Error('Could not load the audio reuse screen. Refresh MinusMix and try again.')); };

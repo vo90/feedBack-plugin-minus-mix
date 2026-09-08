@@ -5,6 +5,7 @@ import json
 import re
 import zipfile
 from pathlib import Path
+from urllib.parse import urljoin, urlsplit
 
 from scripts.build_release import build_release
 
@@ -67,4 +68,20 @@ def test_frontend_sources_do_not_contain_known_mojibake():
 
     assert "â€¦" not in script
     assert "�" not in script
+
+
+def test_reuse_loader_requests_a_host_served_asset_in_the_release(tmp_path):
+    root = Path(__file__).resolve().parents[1]
+    script = (root / "screen.js").read_text(encoding="utf-8")
+    match = re.search(r"new URL\('([^']*reuse_screen\.js)', base\)", script)
+    assert match, "The reuse tab must declare its helper script URL"
+    relative = match.group(1)
+    with zipfile.ZipFile(build_release(root, tmp_path)) as archive:
+        for prefix in ("/api/plugins/minus_mix/", "/api/plugins/minus_mix/g/2/"):
+            url = urlsplit(urljoin("http://localhost" + prefix + "screen.js?v=0.7.0", relative))
+            # The host serves arbitrary plugin scripts only under assets/ or
+            # src/. Sibling files beside screen.js are not an HTTP surface.
+            assert url.path.startswith(prefix + "assets/")
+            member = "minus_mix/" + url.path.removeprefix(prefix)
+            assert archive.read(member) == (root / relative).read_bytes()
 

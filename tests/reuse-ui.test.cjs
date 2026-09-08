@@ -1,6 +1,6 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
-const ui = require('../reuse_screen.js');
+const ui = require('../assets/reuse_screen.js');
 
 class Node {
   constructor(tag = 'div') { this.tag = tag; this.value = ''; this.childNodes = []; this.listeners = {}; this.disabled = false; }

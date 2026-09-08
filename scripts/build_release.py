@@ -20,7 +20,6 @@ PLUGIN_FILES = (
     "reuse_export.py",
     "reuse_match.py",
     "reuse_routes.py",
-    "reuse_screen.js",
     "reuse_state.py",
     "reuse_support.py",
     "screen.html",
