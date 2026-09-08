@@ -137,8 +137,9 @@
       text('detail', detail);
       var totals = ['Input song packages: ' + Number(job && job.input_packages_total || 0),
         'Output variants: ' + Number(job && job.output_variants_total || 0)];
-      text('counts', totals.concat(['ready', 'review', 'blocked', 'done', 'failed', 'skipped']
-        .map(function (key) { return key + ': ' + Number(counts[key] || 0); })).join(' · '));
+      text('counts', totals.concat(['ready', 'review', 'blocked', 'created', 'existing', 'failed', 'skipped']
+        .map(function (key) { return (key === 'existing' ? 'already complete' : key)
+          + ': ' + Number(counts[key] || 0); })).join(' · '));
       var resources = (job && job.resources) || {};
       text('resources', resources.effective_workers ? 'Workers: ' + resources.effective_workers
         + ' (requested ' + (resources.requested_workers || 'Auto') + '). ' + (resources.reason || '') : 'Auto adapts to CPU, available memory and storage. Manual values are maximums.');
@@ -147,7 +148,9 @@
       var list = $('items'); list.replaceChildren();
       ((job && job.items) || []).forEach(function (item) {
         var row = element('div', null, 'pmx-batch-item');
-        row.appendChild(element('b', item.status));
+        var status = item.status === 'done'
+          ? (item.receipt && item.receipt.recovered ? 'already complete' : 'created') : item.status;
+        row.appendChild(element('b', status));
         var description = element('div', item.title || item.relative_path);
         description.appendChild(element('small', item.relative_path || ''));
         if (variantText(item)) description.appendChild(element('small', 'Variant: ' + variantText(item)));

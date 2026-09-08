@@ -79,7 +79,7 @@ def test_identical_audio_only_collapses_within_same_normalized_variant(tmp_path,
     guitar = next(group for group in preview["groups"] if "guitar" in group["excluded_stems"])
     with pytest.raises(reuse_match.ReuseError, match="compatible"):
         instance.choose(preview["id"], {guitar["id"]: "c.feedpak"})
-    choice = instance.choose(preview["id"], {guitar["id"]: "a.feedpak"})
+    choice = wait_job(instance, instance.choose(preview["id"], {guitar["id"]: "a.feedpak"})["id"])
     assert choice["counts"]["ready"] == 1 and choice["counts"]["review"] == 1
 
 

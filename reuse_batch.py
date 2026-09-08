@@ -20,6 +20,7 @@ MAX_CHECKPOINT_BYTES = 64 * 1024**2
 MAX_RECORD_BYTES = 2 * 1024**2
 SNAPSHOT_CACHE_BYTES = 8 * 1024**2
 SNAPSHOT_CACHE_ENTRIES = 32
+EXISTING_REASON = "Already complete; existing FeedPak verified and left unchanged."
 
 
 class PreviewLimitError(ValueError):
@@ -185,18 +186,48 @@ class ReuseManager:
                 result["status"] = "canceling" if self.event.is_set() else self._worker_phase
             result["items"] = [{key: value for key, value in row.items() if not key.startswith("_")}
                                for row in rows]
+            for row in result["items"]:
+                if row["status"] == "done" and row.get("receipt", {}).get("recovered"):
+                    row["reason"] = EXISTING_REASON
             result["groups"] = [value for key, value in job["groups"].items() if key in group_ids]
             result["source_errors"] = job["source_errors"][:100]
             result["source_errors_total"] = len(job["source_errors"])
             result.update({"items_total": len(job["items"]), "offset": offset, "limit": limit})
             result["output_variants_total"] = sum(bool(row["excluded_stems"]) for row in job["items"])
-            counts = {key: sum(row["status"] == key for row in job["items"])
-                      for key in ("ready", "review", "blocked", "done", "failed", "skipped", "running")}
-            counts["total"] = len(job["items"])
+            counts = self._counts(job)
             result["counts"] = counts
+            if result["status"] in ("ready", "completed"):
+                result["detail"] = self._summary(job, result["status"])
             terminal = sum(counts[key] for key in ("done", "failed", "blocked", "skipped"))
             result["progress"] = terminal / max(1, counts["total"])
             return copy.deepcopy(result)
+
+    @staticmethod
+    def _counts(job):
+        counts = {key: sum(row["status"] == key for row in job["items"])
+                  for key in ("ready", "review", "blocked", "done", "failed", "skipped", "running")}
+        counts["existing"] = sum(row["status"] == "done" and bool(row.get("receipt", {}).get("recovered"))
+                                 for row in job["items"])
+        counts["created"] = counts["done"] - counts["existing"]
+        counts["total"] = len(job["items"])
+        return counts
+
+    def _summary(self, job, status):
+        counts = self._counts(job)
+        if status == "completed":
+            detail = f"{counts['created']} created; {counts['existing']} already complete."
+        elif counts["ready"]:
+            detail = f"{counts['ready']} ready to create; {counts['existing']} already complete."
+        elif counts["review"]:
+            detail = f"Choose recordings for {counts['review']} variants; {counts['existing']} already complete."
+        elif counts["existing"] and not counts["blocked"] and not counts["skipped"]:
+            detail = f"No new FeedPaks needed; {counts['existing']} already complete."
+        else:
+            detail = f"No new FeedPaks ready to create; {counts['existing']} already complete."
+        if counts["blocked"] or counts["failed"] or counts["skipped"]:
+            detail += (f" {counts['blocked']} blocked; {counts['failed']} failed;"
+                       f" {counts['skipped']} skipped. Review the listed reasons.")
+        return detail
 
     def latest(self, *, offset=0, limit=100):
         with self.lock:
@@ -342,8 +373,9 @@ class ReuseManager:
                 self.job["items"].sort(key=lambda row: (row["relative_path"].casefold(), row["excluded_stems"]))
                 self._reserve_outputs()
                 self._check_plan_size()
-                self.job.update(status="ready", detail="Review the detected mix variants, then create new packages.",
-                                _scan_complete=True)
+            self._verify_existing_rows(self.job["items"], workers)
+            with self.lock:
+                self.job.update(status="ready", detail=self._summary(self.job, "ready"), _scan_complete=True)
             self._persist()
         except Exception as exc:
             with self.lock:
@@ -352,6 +384,57 @@ class ReuseManager:
                     # A partial oversized preview cannot authorize any output.
                     self.job.update(items=[], groups={}, _donors={})
                 self.job.update(status="canceled" if self.event.is_set() else "failed", detail=str(exc)[:500])
+            self._persist()
+
+    def _verify_existing_rows(self, rows, workers):
+        selected = (row for row in rows if row["status"] == "ready" and row["donor_relative"])
+        for _ in self._bounded(selected, self._preview_existing, workers):
+            pass
+
+    def _preview_existing(self, row):
+        try:
+            old_root, fresh_root, output_root = self._guard()
+            target = self.support.checked_path(output_root, row["output_relative"],
+                                               self.match.ReuseError, exists=False)
+            if not target.exists():
+                return
+            with self.lock:
+                self.job["detail"] = "Checking existing output: " + row["output_relative"]
+            fresh, donor = row["_fresh"], self.job["_donors"][row["donor_relative"]]
+            # Reuse the scan's parsed inputs, but verify their current bytes and
+            # guarded paths before recognizing an output as already complete.
+            for root, relative, info in ((fresh_root, row["relative_path"], fresh),
+                                         (old_root, row["donor_relative"], donor)):
+                path = self.support.checked_path(root, relative, self.match.ReuseError)
+                if path != Path(info["path"]):
+                    raise self.match.ReuseError("Input path changed after inspection; scan again.")
+                self.packing.recheck(info, self.match, self._cancel)
+            receipt = self.packing.completed_output(target, fresh, donor, match=self.match,
+                                                    cancel=self._cancel, stem_label=self.exporter.stem_label)
+            for info in (fresh, donor):
+                if self.match.signature(Path(info["path"])) != info["signature"]:
+                    raise self.match.ReuseError("Input changed during verification; scan again.")
+            self._guard()
+            if not receipt:
+                raise self.match.ReuseError("Output exists with different content; it was not overwritten.")
+            with self.lock:
+                row.update(status="done", reason=EXISTING_REASON, receipt=receipt)
+        except Exception as exc:
+            self._cancel()
+            with self.lock:
+                row.update(status="blocked", reason="Existing output could not be accepted: " + str(exc)[:440])
+                row.pop("receipt", None)
+
+    def _check_choices(self, rows):
+        try:
+            workers = min(4, self.job["resources"]["effective_workers"])
+            self._verify_existing_rows(rows, workers)
+            with self.lock:
+                self.job.update(status="ready", detail=self._summary(self.job, "ready"))
+        except Exception as exc:
+            with self.lock:
+                self.job.update(status="canceled" if self.event.is_set() else "failed", detail=str(exc)[:500])
+        finally:
             self._persist()
 
     def _add_row(self, relative, info, error, by_identity):
@@ -473,6 +556,7 @@ class ReuseManager:
                 group = job["groups"].get(group_id)
                 if not group or donor_id not in {"__skip__", *(item["id"] for item in group["candidates"])}:
                     raise self.match.ReuseError("Choice is not a compatible preview candidate.")
+            changed = []
             for row in job["items"]:
                 if row["group_id"] not in choices or row["status"] == "done":
                     continue
@@ -480,7 +564,11 @@ class ReuseManager:
                 row.update(status="skipped" if choice == "__skip__" else "ready",
                            donor_relative=None if choice == "__skip__" else choice,
                            reason="Skipped by choice." if choice == "__skip__" else "Recording chosen in review.")
-        self._persist()
+                changed.append(row)
+            self.event = threading.Event()
+            job.update(status="scanning", detail="Checking existing outputs for the chosen recordings.")
+        self._persist_start()
+        self._launch(lambda: self._check_choices(changed))
         return self.get(job_id)
 
     def apply(self, job_id):
@@ -596,7 +684,8 @@ class ReuseManager:
                                                     exporter=self.exporter, cancel=self._cancel, guard=guard,
                                                     snapshot_verified=True)
             with self.lock:
-                row.update(status="done", reason="Created and byte-verified; audio was not encoded.", receipt=receipt)
+                reason = EXISTING_REASON if receipt.get("recovered") else "Created and byte-verified; audio was not encoded."
+                row.update(status="done", reason=reason, receipt=receipt)
             self._record(row)
         except Exception as exc:
             with self.lock:
@@ -629,7 +718,7 @@ class ReuseManager:
             with self.lock:
                 if all(row["status"] == "done" for row in rows):
                     self.job.pop("journal_warning", None)
-                self.job.update(status="completed", detail="Audio reuse completed; review any skipped or failed items.")
+                self.job.update(status="completed", detail=self._summary(self.job, "completed"))
         except Exception as exc:
             with self.lock:
                 self.job.update(status="canceled" if self.event.is_set() else "failed", detail=str(exc)[:500])

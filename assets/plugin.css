@@ -76,7 +76,8 @@
 .practice-mix-exporter input:focus, .practice-mix-exporter select:focus {
   outline: 2px solid rgba(96,165,250,.55); outline-offset: 1px;
 }
-.practice-mix-exporter select { display: block; margin-top: .55rem; min-height: 9.2rem; }
+.practice-mix-exporter select { display: block; margin-top: .55rem; }
+.practice-mix-exporter #pmx-source { min-height: 9.2rem; }
 .practice-mix-exporter select option { padding: .35rem .45rem; }
 .practice-mix-exporter .pmx-button {
   flex: 0 0 auto; border: 0; border-radius: 7px; padding: .52rem .85rem;

@@ -49,6 +49,13 @@ in MinusMix. Choose three separate, non-overlapping folders: your existing Minus
 FeedPaks, the fresh ordinary FeedPaks, and a new output folder. Scan and review the
 matches, then create the new copies. Both input folders remain read-only.
 
+Both input folders are scanned recursively. Output preserves subfolders relative
+to the selected **Current original packages** folder. A repeat scan verifies
+existing outputs and counts exact matches as **already complete**. Only remaining
+ready files need Apply; the summary reports created files separately from already
+complete ones. Different or damaged existing outputs are reported as conflicts
+and are never overwritten.
+
 The existing folder can mix any supported removed-stem combinations: No Guitar,
 No Vocals, No Guitar + Vocals, and others. Scan reads each donor's saved MinusMix
 metadata automatically; there is no batch-wide stem selection. Each compatible

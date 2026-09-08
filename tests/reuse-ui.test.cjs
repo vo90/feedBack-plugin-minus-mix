@@ -73,6 +73,42 @@ async function main() {
   assert(complete.calls.every(call => !call.options));
   complete.controller.hide();
 
+  // Repeated scans are read-only even when every planned output already exists.
+  const existingRow = { ...reviewed.items[0], status: 'done', receipt: { recovered: true },
+    reason: 'Already complete and byte-verified; no new file was created.' };
+  for (const status of ['ready', 'completed']) {
+    const existing = environment({ ...reviewed, status,
+      detail: 'No new FeedPaks needed. 0 created · 10 already complete.',
+      counts: { total: 10, ready: 0, done: 10, created: 0, existing: 10 },
+      items: [existingRow], items_total: 10 });
+    await existing.controller.show();
+    assert.equal(node(existing, 'apply').disabled, true, 'All-existing scans cannot create files');
+    assert.equal(node(existing, 'resume').disabled, true, 'Verified existing files need no resume');
+    assert.equal(node(existing, 'scan').disabled, false, 'An explicit new scan remains available');
+    assert.equal(node(existing, 'detail').textContent, 'No new FeedPaks needed. 0 created · 10 already complete.');
+    assert(node(existing, 'counts').textContent.includes('created: 0 · already complete: 10'),
+      'Global completion counts must not be inferred from the current page');
+    assert(!node(existing, 'counts').textContent.includes('done:'), 'Done does not imply new files were created');
+    assert.equal(node(existing, 'items').find('b')[0].textContent, 'already complete',
+      'Recovered receipts from current or older completed jobs have an explicit label');
+    node(existing, 'apply').fire('click'); node(existing, 'resume').fire('click'); await tick();
+    assert(existing.calls.every(call => !call.options), 'An all-existing result never sends Apply');
+    existing.controller.hide();
+  }
+
+  const partial = environment({ ...reviewed,
+    counts: { total: 3, ready: 1, done: 2, created: 1, existing: 1 },
+    items: [existingRow, { ...reviewed.items[0], status: 'done', receipt: { recovered: false } }, reviewed.items[0]],
+    items_total: 3 });
+  await partial.controller.show();
+  assert(node(partial, 'counts').textContent.includes('ready: 1'));
+  assert(node(partial, 'counts').textContent.includes('created: 1 · already complete: 1'));
+  assert.deepEqual(node(partial, 'items').find('b').map(item => item.textContent), ['already complete', 'created', 'ready']);
+  assert.equal(node(partial, 'apply').disabled, false, 'Existing outputs do not block remaining ready files');
+  node(partial, 'apply').fire('click'); await tick();
+  assert.equal(partial.calls.filter(call => call.path.endsWith('/apply')).length, 1);
+  partial.controller.hide();
+
   const warning = '<journal record could not be read>';
   const journal = environment({ ...reviewed, journal_warning: warning });
   await journal.controller.show();

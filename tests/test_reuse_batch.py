@@ -53,7 +53,7 @@ def test_ambiguous_recording_choice_applies_to_all_matching_targets_once(tmp_pat
     assert group["targets_count"] == 2
     with pytest.raises(reuse_match.ReuseError, match="compatible"):
         instance.choose(preview["id"], {group["id"]: "../outside.feedpak"})
-    chosen = instance.choose(preview["id"], {group["id"]: "alternate.feedpak"})
+    chosen = wait_job(instance, instance.choose(preview["id"], {group["id"]: "alternate.feedpak"})["id"])
     assert chosen["counts"]["ready"] == 2
     completed = wait_job(instance, instance.apply(preview["id"])["id"])
     assert completed["counts"]["done"] == 2
