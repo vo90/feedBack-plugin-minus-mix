@@ -9,7 +9,6 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-import re
 import stat
 import unicodedata
 import zipfile
@@ -17,8 +16,9 @@ from pathlib import Path, PurePosixPath
 
 import yaml
 
-POLICY = "minusmix-audio-reuse-1"
+POLICY = "minusmix-audio-reuse-2"
 MAX_FILES = 10_000
+MAX_OUTPUT_ROWS = 50_000
 MAX_PACKAGE = 2 * 1024**3
 MAX_CHART = 32 * 1024**2
 MAX_CHARTS_BYTES = 128 * 1024**2
@@ -106,12 +106,50 @@ def normalized(value):
     return " ".join(unicodedata.normalize("NFKC", str(value or "")).casefold().split())
 
 
-def base_title(manifest):
+def canonical_excluded_stems(value):
+    """Canonical IDs, preserving the normal exporter's custom-stem support."""
+    if not isinstance(value, list) or not value:
+        raise ReuseError("MinusMix excluded_stems must be a nonempty list.")
+    selected = []
+    for raw in value:
+        if not isinstance(raw, str) or not raw.strip() or any(ord(char) < 32 for char in raw):
+            raise ReuseError("MinusMix excluded_stems contains an invalid stem ID.")
+        stem = raw.strip().lower()
+        if stem == "full" or stem in selected:
+            raise ReuseError("MinusMix excluded_stems contains full or duplicate stem IDs.")
+        selected.append(stem)
+    return sorted(selected)
+
+
+def variant_suffix(stems, *, stem_label=None):
+    """Display canonical IDs with the normal exporter's supplied label helper."""
+    def fallback_label(stem):
+        return (" ".join(stem.replace("_", " ").split()).strip(" .")[:80] or "Stem").title()
+
+    label = stem_label or fallback_label
+    return "No " + " + ".join(label(stem) for stem in canonical_excluded_stems(stems))
+
+
+def base_title(manifest, *, stem_label=None):
     title = str(manifest.get("title") or "").strip()
     marker = manifest.get("minus_mix") or {}
-    if isinstance(marker, dict) and marker.get("excluded_stems") == ["guitar"]:
-        title = str(marker.get("source_title") or title)
-    return re.sub(r"(?i)\s*\(no guitar\)\s*$", "", title).strip()
+    if not marker:
+        return title
+    if not isinstance(marker, dict):
+        raise ReuseError("Invalid MinusMix metadata.")
+    stems = canonical_excluded_stems(marker.get("excluded_stems"))
+    if "source_title" in marker:
+        source_title = marker["source_title"]
+        if not isinstance(source_title, str) or not source_title.strip():
+            raise ReuseError("Invalid MinusMix source_title.")
+        return source_title.strip()
+    # Legacy exports retain their selection order in the title. Canonical
+    # identity order does not grant permission to strip any generic No suffix.
+    labels = {stem: variant_suffix([stem], stem_label=stem_label)[3:] for stem in stems}
+    suffix = " (No " + " + ".join(labels[stem.strip().lower()] for stem in marker["excluded_stems"]) + ")"
+    if not title.endswith(suffix) or not title[:-len(suffix)].strip():
+        raise ReuseError("MinusMix title has no metadata-consistent suffix or source_title.")
+    return title[:-len(suffix)].strip()
 
 
 def _number(value, field):
@@ -200,7 +238,7 @@ def _audio(archive, entries, manifest, cancel):
     return result
 
 
-def inspect_package(path, *, donor=False, cancel=None, include_payload=False):
+def inspect_package(path, *, donor=False, cancel=None, include_payload=False, stem_label=None):
     path = Path(path)
     before = signature(path)
     if before[2] > MAX_PACKAGE:
@@ -211,12 +249,14 @@ def inspect_package(path, *, donor=False, cancel=None, include_payload=False):
         manifest_name = next(name for name in ("manifest.yaml", "manifest.yml") if name in entries)
         manifest_sha = hashlib.sha256(archive.read(manifest_name)).hexdigest()
         marker = manifest.get("minus_mix") or {}
-        if donor and (not isinstance(marker, dict) or marker.get("excluded_stems") != ["guitar"]):
-            raise ReuseError("Not a declared No Guitar MinusMix package.")
+        if donor and not marker:
+            raise ReuseError("Not a declared MinusMix package.")
+        excluded_stems = canonical_excluded_stems(marker.get("excluded_stems")) if isinstance(marker, dict) and marker else []
+        title = base_title(manifest, stem_label=stem_label)
         duration = _number(manifest.get("duration"), "song duration")
         if duration <= 0:
             raise ReuseError("Song duration must be positive.")
-        identity = [normalized(manifest.get("artist")), normalized(base_title(manifest))]
+        identity = [normalized(manifest.get("artist")), normalized(title)]
         if not all(identity):
             raise ReuseError("Artist and song title are required for matching.")
         arrangements, total = [], 0
@@ -248,13 +288,15 @@ def inspect_package(path, *, donor=False, cancel=None, include_payload=False):
     if signature(path) != before:
         raise ReuseError("Package changed while being inspected.")
     return {"path": str(path), "sha256": digest, "signature": before,
-            "identity": identity, "title": base_title(manifest),
+            "identity": identity, "title": title,
             "artist": str(manifest.get("artist")), "duration": duration,
             "album": normalized(manifest.get("album")), "year": str(manifest.get("year") or ""),
             "offset": _number(0 if manifest.get("offset") is None else manifest["offset"], "offset"),
             "audio_offset": _number(0 if manifest.get("audio_offset") is None else manifest["audio_offset"], "audio offset"),
             "arrangements": sorted(arrangements), "audio": audio,
             "derived": bool(marker), "policy": POLICY,
+            "excluded_stems": excluded_stems,
+            "variant_suffix": variant_suffix(excluded_stems, stem_label=stem_label) if excluded_stems else None,
             "manifest_sha256": manifest_sha, "payload_hashes": payload}
 
 
@@ -270,4 +312,5 @@ def compatible(fresh, donor):
 
 def audio_identity(donor):
     audio = donor["audio"]
-    return (audio["full"]["sha256"], audio.get("preview", {}).get("sha256"), audio["codec"])
+    return (tuple(canonical_excluded_stems(donor["excluded_stems"])), audio["full"]["sha256"],
+            audio.get("preview", {}).get("sha256"), audio["codec"])

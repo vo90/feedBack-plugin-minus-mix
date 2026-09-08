@@ -7,13 +7,23 @@ import importlib.util
 import json
 import os
 import re
+import shutil
 import threading
 import time
 import uuid
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from collections import OrderedDict
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from pathlib import Path
 
 ACTIVE = {"scanning", "running", "canceling"}
+MAX_CHECKPOINT_BYTES = 64 * 1024**2
+MAX_RECORD_BYTES = 2 * 1024**2
+SNAPSHOT_CACHE_BYTES = 8 * 1024**2
+SNAPSHOT_CACHE_ENTRIES = 32
+
+
+class PreviewLimitError(ValueError):
+    """The complete reviewed plan must fit the bounded resume format."""
 
 
 class ReuseManager:
@@ -26,19 +36,28 @@ class ReuseManager:
         self.event = threading.Event()
         self.job = None
         self.load_error = None
+        self.legacy_checkpoint = False
+        self._snapshots = OrderedDict()
+        self._snapshot_bytes = 0
+        self._plan_bytes = 0
+        self._working = False
+        self._worker_phase = None
         self._load()
 
     def _load(self):
         if not self.state_file.is_file():
             return
         try:
-            if self.state_file.stat().st_size > 64 * 1024**2:
+            if self.state_file.stat().st_size > MAX_CHECKPOINT_BYTES:
                 raise ValueError("Checkpoint exceeds its size limit.")
             data = json.loads(self.state_file.read_text(encoding="utf-8"))
+            if isinstance(data, dict) and data.get("policy") == "minusmix-audio-reuse-1":
+                self.legacy_checkpoint = True
+                raise ValueError("This preview used the earlier guitar-only rules. Scan again to detect all mix variants.")
             spec = importlib.util.spec_from_file_location("_minusmix_reuse_state", Path(__file__).with_name("reuse_state.py"))
             state = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(state)
-            state.validate(data, self.match.POLICY, self.match.MAX_FILES)
+            state.validate(data, self.match.POLICY, self.match.MAX_FILES, self.match.MAX_OUTPUT_ROWS)
             self._replay(data)
             for row in data["items"]:
                 if row["status"] == "done" and not self._receipt_valid(data, row, row.get("receipt")):
@@ -61,10 +80,12 @@ class ReuseManager:
         # older parallel worker snapshot can never replace newer receipts.
         with self.persist_lock:
             with self.lock:
-                payload = json.dumps(self.job, ensure_ascii=False, separators=(",", ":"))
+                payload = json.dumps(self.job, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            if len(payload) > MAX_CHECKPOINT_BYTES:
+                raise PreviewLimitError("The saved job exceeds its size limit; use smaller input folders.")
             self.state_file.parent.mkdir(parents=True, exist_ok=True)
             temp = self.state_file.with_suffix(".tmp")
-            with temp.open("w", encoding="utf-8") as stream:
+            with temp.open("wb") as stream:
                 stream.write(payload)
                 stream.flush()
                 os.fsync(stream.fileno())
@@ -83,6 +104,8 @@ class ReuseManager:
             return False
         try:
             return (re.fullmatch(r"[a-f0-9]{64}", receipt["output_sha256"]) is not None
+                    and row["excluded_stems"] == donor["excluded_stems"]
+                    and receipt.get("excluded_stems") == row["excluded_stems"]
                     and receipt.get("plan_key") == self.packing.plan_key(row["_fresh"], donor, self.match)
                     and receipt.get("output") == str(Path(job["output_dir"]) / row["output_relative"]))
         except (KeyError, ValueError, TypeError):
@@ -93,11 +116,11 @@ class ReuseManager:
             return
         rows = {row["id"]: row for row in job["items"]}
         try:
-            if self.journal_file.stat().st_size > 32 * 1024**2:
+            if self.journal_file.stat().st_size > MAX_CHECKPOINT_BYTES:
                 raise ValueError("Receipt journal exceeds its size limit.")
             with self.journal_file.open("rb") as stream:
-                while line := stream.readline(32769):
-                    if len(line) > 32768 or not line.endswith(b"\n"):
+                while line := stream.readline(MAX_RECORD_BYTES + 1):
+                    if len(line) > MAX_RECORD_BYTES or not line.endswith(b"\n"):
                         raise ValueError("Receipt journal has an incomplete final record.")
                     record = json.loads(line)
                     if not isinstance(record, dict) or record.get("job_id") != job["id"]:
@@ -139,7 +162,7 @@ class ReuseManager:
 
     def is_active(self):
         with self.lock:
-            return bool(self.job and self.job["status"] in ACTIVE)
+            return self._working or bool(self.job and self.job["status"] in ACTIVE)
 
     def _require(self, job_id):
         if not self.job or self.job["id"] != job_id:
@@ -156,12 +179,17 @@ class ReuseManager:
             group_ids = {row.get("group_id") for row in rows if row["status"] == "review"}
             result = {key: value for key, value in job.items()
                       if not key.startswith("_") and key not in ("items", "groups", "source_errors")}
+            if self._working and result["status"] not in ACTIVE:
+                # Terminal status becomes public only after its checkpoint is
+                # durable. A new scan/resume cannot race the preceding save.
+                result["status"] = "canceling" if self.event.is_set() else self._worker_phase
             result["items"] = [{key: value for key, value in row.items() if not key.startswith("_")}
                                for row in rows]
             result["groups"] = [value for key, value in job["groups"].items() if key in group_ids]
             result["source_errors"] = job["source_errors"][:100]
             result["source_errors_total"] = len(job["source_errors"])
             result.update({"items_total": len(job["items"]), "offset": offset, "limit": limit})
+            result["output_variants_total"] = sum(bool(row["excluded_stems"]) for row in job["items"])
             counts = {key: sum(row["status"] == key for row in job["items"])
                       for key in ("ready", "review", "blocked", "done", "failed", "skipped", "running")}
             counts["total"] = len(job["items"])
@@ -180,11 +208,27 @@ class ReuseManager:
             return self.get(self.job["id"], offset=offset, limit=limit) if self.job else None
 
     def _launch(self, target):
-        thread = threading.Thread(target=target, name="minusmix-audio-reuse", daemon=True)
+        with self.lock:
+            self._working = True
+            self._worker_phase = self.job["status"]
+
+        def execute():
+            try:
+                target()
+            except Exception as exc:
+                self.log.exception("minus_mix: audio reuse worker failed")
+                with self.lock:
+                    self.job.update(status="failed", detail=f"Could not finish saving this job: {exc}"[:500])
+            finally:
+                with self.lock:
+                    self._working = False
+
+        thread = threading.Thread(target=execute, name="minusmix-audio-reuse", daemon=True)
         try:
             thread.start()
         except Exception:
             with self.lock:
+                self._working = False
                 self.job.update(status="failed", detail="The background worker could not start.")
             self._persist()
             raise
@@ -202,14 +246,25 @@ class ReuseManager:
         with self.lock:
             if self.is_active():
                 raise self.match.ReuseError("An audio reuse job is already running.")
+            if self.legacy_checkpoint:
+                # Preserve v1 evidence once before replacing its active state.
+                archive = self.state_file.parent / ("audio-reuse-v1-" + uuid.uuid4().hex)
+                archive.mkdir()
+                for path in (self.state_file, self.journal_file):
+                    if path.is_file():
+                        shutil.copy2(path, archive / path.name)
+                self.legacy_checkpoint = False
+            self.load_error = None
             # Reserve before hardware inspection or directory enumeration.
             self.event = threading.Event()
             self.job = {"id": uuid.uuid4().hex, "policy": self.match.POLICY,
                         "status": "scanning", "created_at": time.time(), "detail": "Reading folders",
                         "old_dir": str(roots[0]), "fresh_dir": str(roots[1]), "output_dir": str(roots[2]),
                         "items": [], "groups": {}, "source_errors": [], "resources": {},
+                        "input_packages_total": 0,
                         "_donors": {}, "_root_ids": [self.match.signature(root)[:2] for root in roots],
                         "_workers": workers, "_scan_complete": False}
+            self._plan_bytes = 4096 + len(json.dumps(self.job, ensure_ascii=False).encode("utf-8"))
             job_id = self.job["id"]
         self._persist_start()
         self._launch(self._scan)
@@ -227,7 +282,8 @@ class ReuseManager:
         relative, path = entry
         self._cancel()
         try:
-            info = self.match.inspect_package(path, donor=donor, cancel=self._cancel)
+            info = self.match.inspect_package(path, donor=donor, cancel=self._cancel,
+                                              stem_label=self.exporter.stem_label)
             info["relative_path"] = relative
             return relative, info, None
         except Exception as exc:
@@ -265,9 +321,12 @@ class ReuseManager:
             ):
                 with self.lock:
                     if info:
+                        self._account_plan({relative: info})
                         self.job["_donors"][relative] = info
-                    elif error != "Not a declared No Guitar MinusMix package.":
-                        self.job["source_errors"].append({"relative_path": relative, "reason": error})
+                    elif error:
+                        failure = {"relative_path": relative, "reason": error}
+                        self._account_plan(failure)
+                        self.job["source_errors"].append(failure)
                     self.job["detail"] = f"Read existing audio: {relative}"
             by_identity = {}
             for info in self.job["_donors"].values():
@@ -277,52 +336,112 @@ class ReuseManager:
                 lambda entry: self._inspect(entry, False), workers,
             ):
                 with self.lock:
+                    self.job["input_packages_total"] += 1
                     self._add_row(relative, info, error, by_identity)
             with self.lock:
-                self.job["items"].sort(key=lambda row: row["relative_path"].casefold())
+                self.job["items"].sort(key=lambda row: (row["relative_path"].casefold(), row["excluded_stems"]))
                 self._reserve_outputs()
-                self.job.update(status="ready", detail="Review matches, then create new No Guitar packages.",
+                self._check_plan_size()
+                self.job.update(status="ready", detail="Review the detected mix variants, then create new packages.",
                                 _scan_complete=True)
             self._persist()
         except Exception as exc:
             with self.lock:
+                self.job["_scan_complete"] = False
+                if isinstance(exc, PreviewLimitError):
+                    # A partial oversized preview cannot authorize any output.
+                    self.job.update(items=[], groups={}, _donors={})
                 self.job.update(status="canceled" if self.event.is_set() else "failed", detail=str(exc)[:500])
             self._persist()
 
     def _add_row(self, relative, info, error, by_identity):
-        row = {"id": relative, "relative_path": relative, "title": info["title"] if info else relative,
-               "status": "blocked", "reason": error or "No compatible existing No Guitar version found.",
-               "group_id": None, "donor_relative": None, "output_relative": None, "_fresh": info}
+        row = {"relative_path": relative, "title": info["title"] if info else relative,
+               "status": "blocked", "reason": error or "No compatible existing MinusMix version found.",
+               "group_id": None, "donor_relative": None, "output_relative": None, "_fresh": info,
+               "excluded_stems": [], "variant_label": ""}
+        variants = {}
         if info and info["derived"]:
             row.update(status="skipped", reason="Fresh input is already a derived mix; use its ordinary fresh package.")
         elif info:
-            candidates = [donor for donor in by_identity.get(tuple(info["identity"]), [])
-                          if self.match.compatible(info, donor)]
+            for donor in by_identity.get(tuple(info["identity"]), []):
+                if self.match.compatible(info, donor):
+                    variants.setdefault(tuple(donor["excluded_stems"]), []).append(donor)
+        if len(self.job["items"]) + max(1, len(variants)) > self.match.MAX_OUTPUT_ROWS:
+            raise PreviewLimitError(
+                f"Preview exceeds the {self.match.MAX_OUTPUT_ROWS:,} output-row limit; use smaller input folders.")
+        if not variants:
+            row["id"] = self._row_id(relative, [])
+            self._account_plan(row)
+            self.job["items"].append(row)
+        for stems, candidates in sorted(variants.items()):
+            variant = {**row, "id": self._row_id(relative, stems), "excluded_stems": list(stems),
+                       "variant_label": self.match.variant_suffix(list(stems), stem_label=self.exporter.stem_label)}
             unique = {}
             for donor in sorted(candidates, key=lambda value: value["relative_path"].casefold()):
                 unique.setdefault(self.match.audio_identity(donor), donor)
-            if unique:
-                group_data = [info["identity"], info["arrangements"], info["duration"],
-                              sorted(donor["relative_path"] for donor in unique.values())]
-                group_id = hashlib.sha256(json.dumps(group_data).encode()).hexdigest()[:24]
-                row["group_id"] = group_id
-                manual = len(unique) > 1
-                row["status"] = "review" if manual else "ready"
-                row["reason"] = ("Choose a compatible recording: multiple audio versions match."
-                                 if manual else "Unique compatible recording among readable donors; known repair fields may differ.")
-                if not manual:
-                    row["donor_relative"] = next(iter(unique.values()))["relative_path"]
-                group = self.job["groups"].setdefault(group_id, {
-                    "id": group_id, "title": info["title"], "targets_count": 0, "reason": row["reason"],
-                    "candidates": [{"id": value["relative_path"], "relative_path": value["relative_path"],
-                                    "full_sha256": value["audio"]["full"]["sha256"],
-                                    "preview_sha256": value["audio"].get("preview", {}).get("sha256")}
-                                   for value in unique.values()],
-                })
-                group["targets_count"] += 1
-        with self.lock:
-            self.job["items"].append(row)
-            self.job["detail"] = f"Matched fresh charts: {relative}"
+            self._set_variant_group(variant, info, unique)
+            self._account_plan(variant)
+            self.job["items"].append(variant)
+        self.job["detail"] = f"Matched fresh charts: {relative}"
+
+    @staticmethod
+    def _row_id(relative, stems):
+        return hashlib.sha256(json.dumps([relative, list(stems)]).encode()).hexdigest()
+
+    def _set_variant_group(self, row, info, unique):
+        group_data = [info["identity"], info["arrangements"], info["duration"], info["offset"],
+                      info["audio_offset"], row["excluded_stems"],
+                      sorted(donor["relative_path"] for donor in unique.values())]
+        group_id = hashlib.sha256(json.dumps(group_data).encode()).hexdigest()[:24]
+        row["group_id"] = group_id
+        manual = len(unique) > 1
+        row["status"] = "review" if manual else "ready"
+        row["reason"] = ("Choose a compatible recording: multiple audio versions of this mix variant match."
+                         if manual else "Unique compatible recording among readable donors; known repair fields may differ.")
+        if not manual:
+            row["donor_relative"] = next(iter(unique.values()))["relative_path"]
+        group = self.job["groups"].get(group_id)
+        if group is None:
+            group = self._new_group(group_id, row, info, unique)
+            self._account_plan({group_id: group})
+            self.job["groups"][group_id] = group
+        group["targets_count"] += 1
+
+    @staticmethod
+    def _new_group(group_id, row, info, unique):
+        return {
+            "id": group_id, "title": info["title"], "targets_count": 0, "reason": row["reason"],
+            "excluded_stems": row["excluded_stems"], "variant_label": row["variant_label"],
+            "candidates": [{"id": value["relative_path"], "relative_path": value["relative_path"],
+                            "full_sha256": value["audio"]["full"]["sha256"],
+                            "preview_sha256": value["audio"].get("preview", {}).get("sha256")}
+                           for value in unique.values()],
+        }
+
+    def _account_plan(self, value):
+        # Incremental accounting avoids retaining an unbounded preview before
+        # the final completion-headroom check. No quadratic whole-plan writes.
+        self._plan_bytes += 64 + len(json.dumps(value, ensure_ascii=False).encode("utf-8"))
+        if self._plan_bytes > MAX_CHECKPOINT_BYTES:
+            raise PreviewLimitError("Preview exceeds the saved-job size limit; use smaller input folders.")
+
+    def _check_plan_size(self):
+        size = len(json.dumps(self.job, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+        # Reserve enough for every completion receipt, bounded error text and
+        # output path before approving a plan that has to survive restart.
+        reserve = 0
+        for row in self.job["items"]:
+            if not row["output_relative"]:
+                continue
+            row_reserve = 4096 + len(json.dumps({
+                "output": str(Path(self.job["output_dir"]) / row["output_relative"]),
+                "excluded_stems": row["excluded_stems"],
+            }, ensure_ascii=False).encode("utf-8"))
+            if row_reserve > MAX_RECORD_BYTES:
+                raise PreviewLimitError("A mix variant exceeds the completion-record size limit.")
+            reserve += row_reserve
+        if size + reserve > MAX_CHECKPOINT_BYTES:
+            raise PreviewLimitError("Preview and completion receipts exceed the saved-job size limit; use smaller input folders.")
 
     def _reserve_outputs(self):
         used = set()
@@ -330,10 +449,14 @@ class ReuseManager:
             if row["status"] in ("blocked", "skipped"):
                 continue
             relative = Path(row["relative_path"])
-            stem = re.sub(r"(?i)\s*\(no guitar\)\s*$", "", relative.stem)
-            for number in range(1, self.match.MAX_FILES + 1):
+            wanted = self.exporter.desired_output_path(relative.parent, relative,
+                                                       excluded_stems=row["excluded_stems"])
+            # Leave room for collision numbers and .feedpak on Windows, even
+            # when a valid custom stem label or source name uses surrogate pairs.
+            stem = wanted.stem.encode("utf-16-le")[:420].decode("utf-16-le", errors="ignore").rstrip(" .")
+            for number in range(1, self.match.MAX_OUTPUT_ROWS + 1):
                 suffix = "" if number == 1 else f" ({number})"
-                output = relative.with_name(stem + " (No Guitar)" + suffix + ".feedpak").as_posix()
+                output = wanted.with_name(stem + suffix + wanted.suffix).as_posix()
                 if output.casefold() not in used:
                     used.add(output.casefold())
                     row["output_relative"] = output
@@ -389,14 +512,66 @@ class ReuseManager:
         prior_donor = self.job["_donors"][row["donor_relative"]]
         fresh_path = self.support.checked_path(fresh, row["relative_path"], self.match.ReuseError)
         donor_path = self.support.checked_path(old, row["donor_relative"], self.match.ReuseError)
-        current_fresh = self.match.inspect_package(fresh_path, cancel=self._cancel, include_payload=True)
-        current_donor = self.match.inspect_package(donor_path, donor=True, cancel=self._cancel)
-        if current_fresh["sha256"] != prior_fresh["sha256"] or current_donor["sha256"] != prior_donor["sha256"]:
-            raise self.match.ReuseError("Input changed after preview; scan again.")
+        current_fresh = self._snapshot(fresh_path, prior_fresh, donor=False)
+        current_donor = self._snapshot(donor_path, prior_donor, donor=True)
+        if current_donor["excluded_stems"] != row["excluded_stems"]:
+            raise self.match.ReuseError("Selected audio does not match the reviewed mix variant.")
         if not self.match.compatible(current_fresh, current_donor):
             raise self.match.ReuseError("Selected inputs no longer match.")
         target = self.support.checked_path(output, row["output_relative"], self.match.ReuseError, exists=False)
         return current_fresh, current_donor, target
+
+    def _snapshot(self, path, reviewed, *, donor):
+        # Only this Apply run shares verification. Guarded paths and signatures
+        # are checked on every use; streamed output bytes are still verified.
+        if self.match.signature(path) != reviewed["signature"]:
+            raise self.match.ReuseError("Input changed after preview; scan again.")
+        key = (str(path), reviewed["sha256"], donor)
+        with self.lock:
+            entry = self._snapshots.get(key)
+            owner = entry is None
+            if owner:
+                entry = [Future(), 0]
+                self._snapshots[key] = entry
+            self._snapshots.move_to_end(key)
+        future = entry[0]
+        if owner:
+            try:
+                info = self.match.inspect_package(path, donor=donor, cancel=self._cancel,
+                                                  include_payload=not donor, stem_label=self.exporter.stem_label)
+                if info["sha256"] != reviewed["sha256"]:
+                    raise self.match.ReuseError("Input changed after preview; scan again.")
+                size = len(json.dumps(info, ensure_ascii=False).encode("utf-8"))
+                with self.lock:
+                    entry[1] = size
+                    self._snapshot_bytes += size
+                    future.set_result(info)
+                    self._trim_snapshots()
+            except Exception as exc:
+                with self.lock:
+                    future.set_exception(exc)
+                    self._trim_snapshots()
+        while True:
+            self._cancel()
+            try:
+                result = future.result(timeout=0.2)
+                break
+            except TimeoutError:
+                if future.done():
+                    raise
+        if not owner and self.match.digest_file(path, self._cancel) != reviewed["sha256"]:
+            raise self.match.ReuseError("Input content changed after preview; scan again.")
+        if self.match.signature(path) != result["signature"]:
+            raise self.match.ReuseError("Input changed during verification.")
+        return result
+
+    def _trim_snapshots(self):
+        for key, (future, size) in list(self._snapshots.items()):
+            if len(self._snapshots) <= SNAPSHOT_CACHE_ENTRIES and self._snapshot_bytes <= SNAPSHOT_CACHE_BYTES:
+                break
+            if future.done():
+                del self._snapshots[key]
+                self._snapshot_bytes -= size
 
     def _process(self, row):
         try:
@@ -405,7 +580,8 @@ class ReuseManager:
                 row.update(status="running", reason="Verifying the approved inputs.")
             fresh, donor, target = self._current_pair(row)
             if target.exists():
-                receipt = self.packing.completed_output(target, fresh, donor, match=self.match, cancel=self._cancel)
+                receipt = self.packing.completed_output(target, fresh, donor, match=self.match, cancel=self._cancel,
+                                                        stem_label=self.exporter.stem_label)
                 if not receipt:
                     raise self.match.ReuseError("Output exists with different content; it was not overwritten.")
             else:
@@ -430,6 +606,9 @@ class ReuseManager:
         return row["id"]
 
     def _run(self):
+        with self.lock:
+            self._snapshots.clear()
+            self._snapshot_bytes = 0
         try:
             resources = self.support.resources(self.job["_workers"], error=self.match.ReuseError)
             with self.lock:
@@ -455,4 +634,7 @@ class ReuseManager:
             with self.lock:
                 self.job.update(status="canceled" if self.event.is_set() else "failed", detail=str(exc)[:500])
         finally:
+            with self.lock:
+                self._snapshots.clear()
+                self._snapshot_bytes = 0
             self._persist()

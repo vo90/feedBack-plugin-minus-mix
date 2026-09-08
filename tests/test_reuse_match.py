@@ -5,6 +5,7 @@ import zipfile
 
 import pytest
 
+import exporter
 import reuse_match as match
 from tests.reuse_fixtures import chart, package
 
@@ -89,3 +90,68 @@ def test_old_missing_role_provenance_matches_corrected_fresh_labels(tmp_path):
     donor = match.inspect_package(package(tmp_path / "old.feedpak", donor=True, document=old), donor=True)
     target = match.inspect_package(package(tmp_path / "new.feedpak", document=fresh))
     assert match.compatible(target, donor)
+
+
+@pytest.mark.parametrize("stems", [[stem] for stem in exporter.KNOWN_LABELS] + [
+    ["guitar", "bass"], ["synth_pad", "lead guitar", "percussion-2"],
+])
+def test_every_declared_variant_and_custom_ids_are_detected_from_metadata(tmp_path, stems):
+    path = package(tmp_path / "misleading (No Banjo).feedpak", donor=True, excluded_stems=stems)
+    donor = match.inspect_package(path, donor=True, stem_label=exporter.stem_label)
+    assert donor["excluded_stems"] == sorted(stems)
+    assert donor["variant_suffix"] == exporter._suffix(sorted(stems))
+    assert donor["title"] == "Song"
+    assert donor["identity"] == ["artist", "song"]
+
+
+@pytest.mark.parametrize("value", [None, [], "guitar", {}, [None], [1], [True], [""], [" "],
+                                        ["full"], ["guitar", "full"], ["guitar", " GUITAR "], ["bad\nid"]])
+def test_malformed_excluded_stem_metadata_is_not_guessed(tmp_path, value):
+    path = package(tmp_path / "Song (No Guitar).feedpak", donor=True, manifest_changes={
+        "minus_mix": {"excluded_stems": value, "source_title": "Song"},
+    })
+    with pytest.raises(match.ReuseError, match="excluded_stems"):
+        match.inspect_package(path, donor=True)
+
+
+def test_ids_canonicalize_case_space_and_order_but_variant_identity_stays_distinct(tmp_path):
+    variants = []
+    for index, stems in enumerate(([" GUITAR ", "Bass"], ["bass", "guitar"], ["vocals"])):
+        path = package(tmp_path / f"{index}.feedpak", donor=True, excluded_stems=stems)
+        variants.append(match.inspect_package(path, donor=True))
+    assert match.audio_identity(variants[0]) == match.audio_identity(variants[1])
+    assert match.audio_identity(variants[0]) != match.audio_identity(variants[2])
+
+
+def test_legacy_suffix_fallback_matches_exact_metadata_order_and_shared_labels(tmp_path):
+    stems = ["guitar", "bass", "synth_pad"]
+    marker = {"excluded_stems": stems, "generator": "minus_mix"}
+    path = package(tmp_path / "renamed.feedpak", donor=True, excluded_stems=stems,
+                   manifest_changes={"minus_mix": marker})
+    donor = match.inspect_package(path, donor=True, stem_label=exporter.stem_label)
+    assert donor["title"] == "Song"
+    assert donor["variant_suffix"] == "No Bass + Guitar + Synth Pad"
+    marker["excluded_stems"] = ["bass"]
+    path = package(path, donor=True, excluded_stems=stems, manifest_changes={"minus_mix": marker})
+    with pytest.raises(match.ReuseError, match="metadata-consistent suffix"):
+        match.inspect_package(path, donor=True, stem_label=exporter.stem_label)
+
+
+def test_source_title_is_authoritative_and_ordinary_parenthesized_title_is_preserved(tmp_path):
+    title = "Song (No Guitar)"
+    fresh = match.inspect_package(package(tmp_path / "fresh.feedpak", title=title))
+    donor = match.inspect_package(package(tmp_path / "donor.feedpak", donor=True, title=title,
+                                          excluded_stems=["vocals"], manifest_changes={"title": "Renamed"}), donor=True)
+    assert fresh["title"] == title == donor["title"]
+    assert match.compatible(fresh, donor)
+
+
+def test_legacy_suffix_uses_supplied_normal_exporter_label_callback():
+    manifest = {"title": "Song (No Custom Label)", "minus_mix": {"excluded_stems": ["custom"]}}
+
+    def label(stem):
+        assert stem == "custom"
+        return "Custom Label"
+
+    assert match.base_title(manifest, stem_label=label) == "Song"
+    assert match.variant_suffix(["custom"], stem_label=label) == "No Custom Label"

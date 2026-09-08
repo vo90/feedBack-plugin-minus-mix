@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import zipfile
 
 import pytest
@@ -130,3 +131,46 @@ def test_audio_declaration_overlapping_retained_asset_is_rejected(tmp_path):
     with pytest.raises(match.ReuseError, match="overlap"):
         packing.export_reuse(match.inspect_package(path), match.inspect_package(donor, donor=True),
                              tmp_path / "out.feedpak", match=match, exporter=exporter)
+
+
+@pytest.mark.parametrize("stems", [["bass"], ["vocals"], ["guitar", "bass"], ["synth_pad", "other"]])
+def test_variant_export_preserves_audio_members_and_explicit_receipt_binding(tmp_path, stems):
+    fresh, donor = pair(tmp_path, excluded_stems=stems)
+    result = packing.export_reuse(fresh, donor, tmp_path / "output.feedpak", match=match, exporter=exporter)
+    with zipfile.ZipFile(result["output"]) as output, zipfile.ZipFile(fresh["path"]) as source:
+        manifest = yaml.safe_load(output.read("manifest.yaml"))
+        assert manifest["title"] == "Song (" + exporter._suffix(sorted(stems)) + ")"
+        assert manifest["minus_mix"]["excluded_stems"] == sorted(stems)
+        assert manifest["minus_mix"]["audio_reuse"]["excluded_stems"] == sorted(stems)
+        assert output.read("stems/full.ogg") == b"ready-made No Guitar"
+        assert output.read("preview.ogg") == b"encoded preview"
+        for name in ("arrangements/lead.json", "cover.png", "custom.bin"):
+            assert output.read(name) == source.read(name)
+    assert result["excluded_stems"] == sorted(stems)
+    recovered = packing.completed_output(result["output"], fresh, donor, match=match, stem_label=exporter.stem_label)
+    assert recovered["excluded_stems"] == sorted(stems)
+    assert recovered["recovered"]
+
+
+def test_identical_audio_in_different_variants_cannot_reuse_completion(tmp_path):
+    fresh, guitar = pair(tmp_path)
+    bass = copy.deepcopy(guitar)
+    bass["excluded_stems"] = ["bass"]
+    assert packing.plan_key(fresh, guitar, match) != packing.plan_key(fresh, bass, match)
+    result = packing.export_reuse(fresh, guitar, tmp_path / "out.feedpak", match=match, exporter=exporter)
+    assert packing.completed_output(result["output"], fresh, bass, match=match) is None
+
+
+def test_changed_output_variant_metadata_is_not_accepted_on_resume(tmp_path):
+    fresh, donor = pair(tmp_path, excluded_stems=["bass", "guitar"])
+    target = tmp_path / "out.feedpak"
+    packing.export_reuse(fresh, donor, target, match=match, exporter=exporter)
+    with zipfile.ZipFile(target) as output:
+        members = {name: output.read(name) for name in output.namelist()}
+    manifest = yaml.safe_load(members["manifest.yaml"])
+    manifest["minus_mix"]["excluded_stems"] = ["guitar"]
+    members["manifest.yaml"] = yaml.safe_dump(manifest).encode()
+    with zipfile.ZipFile(target, "w") as output:
+        for name, data in members.items():
+            output.writestr(name, data)
+    assert packing.completed_output(target, fresh, donor, match=match) is None

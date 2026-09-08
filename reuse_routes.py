@@ -41,13 +41,13 @@ def register(app, *, api, manager, error_type):
             return invoke(manager.start_scan, **folders, workers=workers)
 
     @app.get(prefix + "/reuse/latest")
-    def reuse_latest(request: Request, offset: int = Query(0, ge=0, le=10000),
+    def reuse_latest(request: Request, offset: int = Query(0, ge=0, le=50000),
                      limit: int = Query(100, ge=1, le=100)):
         local(request)
         return {"job": invoke(manager.latest, offset=offset, limit=limit)}
 
     @app.get(prefix + "/reuse/{job_id}")
-    def reuse_status(job_id: str, request: Request, offset: int = Query(0, ge=0, le=10000),
+    def reuse_status(job_id: str, request: Request, offset: int = Query(0, ge=0, le=50000),
                      limit: int = Query(100, ge=1, le=100)):
         local(request)
         job = invoke(manager.get, job_id, offset=offset, limit=limit)

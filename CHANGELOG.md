@@ -2,8 +2,13 @@
 
 ## Unreleased
 
-- Added a separate reviewed batch job to reuse finished No Guitar audio with
+- Added a separate reviewed batch job to reuse finished MinusMix audio with
   freshly converted or repaired charts, without separation or audio encoding.
+- Detect removed-stem combinations from mixed donor folders and propose separate,
+  correctly named outputs for each matching variant. Duplicate recording review
+  stays within each variant, and progress separates input songs from output variants.
+- Require a fresh scan for earlier No Guitar-only reuse previews while retaining
+  saved records and preserving source packages and existing outputs.
 - Added repair-tolerant version/timeline matching, grouped recording choices,
   bounded workers, exact member verification, no-overwrite publication and
   resumable completion receipts. Both source folder trees remain read-only.

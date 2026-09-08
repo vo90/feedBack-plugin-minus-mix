@@ -31,10 +31,13 @@ function environment(initial, responder) {
 const node = (env, name) => env.nodes['pmx-reuse-' + name];
 const tick = () => new Promise(resolve => setImmediate(resolve));
 const reviewed = { id: 'job', status: 'ready', detail: 'Review proposed output', old_dir: 'C:/old', fresh_dir: 'C:/fresh', output_dir: 'C:/output',
-  counts: { total: 1, ready: 1, review: 0 }, items: [{ relative_path: 'song.feedpak', status: 'ready', title: '<untrusted title>' }], items_total: 1,
+  input_packages_total: 1, output_variants_total: 1,
+  counts: { total: 1, ready: 1, review: 0 }, items: [{ relative_path: 'song.feedpak', status: 'ready', title: '<untrusted title>',
+    excluded_stems: ['guitar'], variant_label: 'No Guitar' }], items_total: 1,
   groups: [], resources: {}, source_errors: [] };
 const ambiguous = { ...reviewed, counts: { total: 1, ready: 0, review: 1 }, groups: [
-  { id: 'group', title: 'Song', targets_count: 1, candidates: [{ id: 'old/song.feedpak', relative_path: 'old/song.feedpak', full_sha256: 'a'.repeat(64) }] }] };
+  { id: 'group', title: 'Song', targets_count: 1, excluded_stems: ['guitar'], variant_label: 'No Guitar',
+    candidates: [{ id: 'old/song.feedpak', relative_path: 'old/song.feedpak', full_sha256: 'a'.repeat(64) }] }] };
 
 async function main() {
   assert.equal(ui.workerSetting('auto'), 'auto');
@@ -87,6 +90,7 @@ async function main() {
   assert.equal(node(initial, 'bar').value, 1, 'A finished review has complete preview progress');
   assert.equal(node(initial, 'apply').disabled, false);
   assert.equal(node(initial, 'items').childNodes[0].childNodes[1].textContent, '<untrusted title>');
+  assert.equal(node(initial, 'items').find('small')[1].textContent, 'Variant: No Guitar');
   node(initial, 'workers').value = '4'; node(initial, 'workers').fire('change');
   assert.equal(node(initial, 'apply').disabled, true, 'Changing settings invalidates Apply');
 
@@ -103,6 +107,53 @@ async function main() {
   node(choices, 'apply').fire('click'); await tick();
   assert.equal(choices.calls.filter(call => call.path.endsWith('/apply')).length, 1);
 
+  const variantRows = [
+    { id: 'song:guitar', relative_path: 'song.feedpak', title: 'Song', status: 'review', excluded_stems: ['guitar'], variant_label: 'No Guitar' },
+    { id: 'song:vocals', relative_path: 'song.feedpak', title: 'Song', status: 'review', excluded_stems: ['vocals'], variant_label: 'No Vocals' },
+  ];
+  const variantGroups = [
+    { ...ambiguous.groups[0], id: 'guitar-group' },
+    { ...ambiguous.groups[0], id: 'vocals-group', excluded_stems: ['vocals'], variant_label: 'No Vocals',
+      candidates: [{ id: 'old/vocals.feedpak', relative_path: 'old/vocals.feedpak', full_sha256: 'b'.repeat(64) }] },
+  ];
+  const mixedJob = { ...reviewed, counts: { total: 2, ready: 0, review: 2 }, input_packages_total: 1,
+    output_variants_total: 2, items_total: 2, items: variantRows, groups: variantGroups };
+  const mixed = environment(mixedJob, (path, options, getJob, setJob) => {
+    if (path.endsWith('/choose')) {
+      assert.deepEqual(JSON.parse(options.body), { choices: { 'guitar-group': 'old/song.feedpak' } });
+      const next = { ...getJob(), groups: [variantGroups[1]], counts: { total: 2, ready: 1, review: 1 },
+        items: [{ ...variantRows[0], status: 'ready', donor_relative: 'old/song.feedpak', output_relative: 'Song (No Guitar).feedpak' }, variantRows[1]] };
+      setJob(next); return Promise.resolve(next);
+    }
+  });
+  await mixed.controller.show();
+  assert(node(mixed, 'counts').textContent.startsWith('Input song packages: 1 · Output variants: 2'), 'One song can produce several output variants');
+  assert.deepEqual(node(mixed, 'items').childNodes.map(row => row.find('small')[1].textContent), ['Variant: No Guitar', 'Variant: No Vocals']);
+  assert.deepEqual(node(mixed, 'groups').childNodes.map(group => group.find('p')[0].textContent), ['Variant: No Guitar', 'Variant: No Vocals']);
+  select = node(mixed, 'groups').find('select')[0]; button = node(mixed, 'groups').find('button')[0];
+  select.value = 'old/song.feedpak'; select.fire('change'); button.fire('click'); await tick();
+  assert.equal(node(mixed, 'groups').childNodes.length, 1, 'Choosing one variant leaves the other variant for review');
+  assert.equal(node(mixed, 'groups').find('p')[0].textContent, 'Variant: No Vocals');
+  assert.equal(node(mixed, 'apply').disabled, true, 'The remaining variant must still be reviewed');
+  assert.equal(mixed.calls.filter(call => call.path.endsWith('/apply')).length, 0);
+  mixed.controller.hide();
+
+  const combined = environment({ ...reviewed, items: [{ ...reviewed.items[0], excluded_stems: ['guitar', 'vocals'], variant_label: 'No Guitar + Vocals' }] });
+  await combined.controller.show();
+  assert.equal(node(combined, 'items').find('small')[1].textContent, 'Variant: No Guitar + Vocals');
+  combined.controller.hide();
+
+  const oldPreview = environment({ id: 'checkpoint-unavailable', status: 'failed',
+    detail: 'Previous preview uses the No Guitar-only policy. Scan again. Saved records and outputs were preserved.',
+    items: [], groups: [], counts: {}, resources: {}, source_errors: [] });
+  await oldPreview.controller.show();
+  assert(node(oldPreview, 'detail').textContent.includes('Scan again.'));
+  assert.equal(node(oldPreview, 'scan').disabled, false, 'An old preview can be replaced by an explicit new scan');
+  assert.equal(node(oldPreview, 'apply').disabled, true);
+  assert.equal(node(oldPreview, 'resume').disabled, true);
+  assert(oldPreview.calls.every(call => !call.options), 'Opening an old preview never starts a new scan');
+  oldPreview.controller.hide();
+
   const dirty = environment(ambiguous);
   await dirty.controller.show();
   select = node(dirty, 'groups').find('select')[0]; button = node(dirty, 'groups').find('button')[0];
@@ -113,11 +164,18 @@ async function main() {
   assert.equal(dirty.calls.filter(call => call.options).length, 0, 'A dirty job cannot save choices or restore old folders');
   assert.equal(node(dirty, 'old').value, 'C:/changed');
 
-  const errors = environment({ ...reviewed, source_errors: [{ relative_path: '<broken>', reason: '<error>' }] });
+  const errors = environment({ ...reviewed, source_errors: [
+    { relative_path: '<broken>', reason: '<error>' },
+    { relative_path: 'missing.feedpak', reason: 'Missing removed-stem metadata.' },
+    { relative_path: 'invalid.feedpak', reason: 'MinusMix excluded_stems contains full or duplicate stem IDs. <details>' },
+  ] });
   await errors.controller.show();
   assert.equal(node(errors, 'errors-wrap').hidden, false);
   assert.equal(node(errors, 'apply').disabled, false, 'Unrelated source errors do not block already reviewed valid rows');
   assert.equal(node(errors, 'errors').childNodes[0].textContent, '<broken>: <error>');
+  assert.equal(node(errors, 'errors').childNodes[1].textContent, 'missing.feedpak: Missing removed-stem metadata.');
+  assert.equal(node(errors, 'errors').childNodes[2].textContent, 'invalid.feedpak: MinusMix excluded_stems contains full or duplicate stem IDs. <details>');
+  assert(node(errors, 'errors').childNodes.every(error => error.childNodes.length === 0), 'Metadata diagnostics are displayed as plain text');
 
   let staleResolve, defer = false;
   const stale = environment(ambiguous, (path, options) => {

@@ -62,11 +62,12 @@ def recheck(info, match, cancel=None):
 
 
 def plan_key(fresh, donor, match):
-    data = [match.POLICY, fresh["sha256"], donor["sha256"], match.audio_identity(donor)]
+    data = [match.POLICY, match.canonical_excluded_stems(donor["excluded_stems"]),
+            fresh["sha256"], donor["sha256"], match.audio_identity(donor)]
     return hashlib.sha256(json.dumps(data, separators=(",", ":")).encode()).hexdigest()
 
 
-def _manifest(fresh_manifest, fresh, donor, match):
+def _manifest(fresh_manifest, fresh, donor, match, *, stem_label=None):
     manifest = copy.deepcopy(fresh_manifest)
     old_audio = {match.member_name(stem["file"]) for stem in manifest.get("stems", [])}
     for key in ("preview", "original_audio"):
@@ -82,7 +83,8 @@ def _manifest(fresh_manifest, fresh, donor, match):
     extension = Path(audio["full"]["member"]).suffix
     full_name = "stems/full" + extension
     replacement = {full_name: audio["full"]}
-    manifest["title"] = fresh["title"] + " (No Guitar)"
+    excluded_stems = match.canonical_excluded_stems(donor["excluded_stems"])
+    manifest["title"] = fresh["title"] + " (" + match.variant_suffix(excluded_stems, stem_label=stem_label) + ")"
     manifest["stems"] = [{"id": "full", "file": full_name,
                            "codec": audio["codec"], "default": True}]
     manifest.pop("original_audio", None)
@@ -93,9 +95,10 @@ def _manifest(fresh_manifest, fresh, donor, match):
         manifest["preview"] = preview
         replacement[preview] = audio["preview"]
     manifest["minus_mix"] = {
-        "excluded_stems": ["guitar"], "source_title": fresh["title"],
+        "excluded_stems": excluded_stems, "source_title": fresh["title"],
         "generator": "minus_mix", "audio_reuse": {
             "policy": match.POLICY, "plan_key": plan_key(fresh, donor, match),
+            "excluded_stems": excluded_stems,
             "fresh_package_sha256": fresh["sha256"],
             "donor_package_sha256": donor["sha256"],
             "full_sha256": audio["full"]["sha256"],
@@ -105,7 +108,7 @@ def _manifest(fresh_manifest, fresh, donor, match):
     return manifest, old_audio, replacement
 
 
-def _build(path, fresh, donor, match, cancel):
+def _build(path, fresh, donor, match, cancel, *, stem_label=None):
     copied = {}
     with zipfile.ZipFile(fresh["path"]) as source, zipfile.ZipFile(donor["path"]) as audio:
         source_entries, audio_entries = match.inventory(source), match.inventory(audio)
@@ -113,7 +116,7 @@ def _build(path, fresh, donor, match, cancel):
         if hashlib.sha256(source.read(manifest_name)).hexdigest() != fresh["manifest_sha256"]:
             raise match.ReuseError("Fresh manifest changed after verification.")
         manifest, remove, replace = _manifest(
-            match.manifest_from(source, source_entries), fresh, donor, match,
+            match.manifest_from(source, source_entries), fresh, donor, match, stem_label=stem_label,
         )
         if (set(replace) & set(source_entries)) - remove:
             raise match.ReuseError("Donor audio destination conflicts with a fresh non-audio member.")
@@ -186,7 +189,7 @@ def export_reuse(fresh, donor, output_path, *, match, exporter, cancel=None, gua
     os.close(fd)
     temp = Path(name)
     try:
-        manifest, copied = _build(temp, fresh, donor, match, cancel)
+        manifest, copied = _build(temp, fresh, donor, match, cancel, stem_label=exporter.stem_label)
         _verify(temp, manifest, copied, match, cancel)
         for info in (fresh, donor):
             if snapshot_verified:
@@ -202,6 +205,7 @@ def export_reuse(fresh, donor, output_path, *, match, exporter, cancel=None, gua
             raise match.ReuseError("Output appeared during creation; it was not overwritten.")
         return {"output": str(output_path), "output_sha256": output_hash,
                 "plan_key": plan_key(fresh, donor, match), "members_verified": len(copied),
+                "excluded_stems": match.canonical_excluded_stems(donor["excluded_stems"]),
                 "audio_sha256": donor["audio"]["full"]["sha256"],
                 "preview_sha256": donor["audio"].get("preview", {}).get("sha256")}
     finally:
@@ -210,7 +214,7 @@ def export_reuse(fresh, donor, output_path, *, match, exporter, cancel=None, gua
             temp.unlink()
 
 
-def completed_output(path, fresh, donor, *, match, cancel=None):
+def completed_output(path, fresh, donor, *, match, cancel=None, stem_label=None):
     """Recognize a crash-published output through provenance AND current bytes."""
     path = Path(path)
     with zipfile.ZipFile(path) as archive:
@@ -219,13 +223,14 @@ def completed_output(path, fresh, donor, *, match, cancel=None):
         receipt = manifest.get("minus_mix", {}).get("audio_reuse", {})
         if receipt.get("plan_key") != plan_key(fresh, donor, match):
             return None
-    actual = match.inspect_package(path, donor=True, cancel=cancel)
+    actual = match.inspect_package(path, donor=True, cancel=cancel, stem_label=stem_label)
     if not match.compatible(fresh, actual) or match.audio_identity(actual) != match.audio_identity(donor):
         return None
     # Preserve all fresh non-audio members, not just compatibility evidence.
     with zipfile.ZipFile(fresh["path"]) as source, zipfile.ZipFile(path) as output:
         src_entries = match.inventory(source)
-        expected_manifest, removed, replaced = _manifest(match.manifest_from(source, src_entries), fresh, donor, match)
+        expected_manifest, removed, replaced = _manifest(match.manifest_from(source, src_entries), fresh, donor,
+                                                       match, stem_label=stem_label)
         if manifest != expected_manifest:
             return None
         expected = set(src_entries) - {"manifest.yaml", "manifest.yml"} - removed - set(replaced)
@@ -236,4 +241,5 @@ def completed_output(path, fresh, donor, *, match, cancel=None):
                 if match.digest_stream(left, cancel) != match.digest_stream(right, cancel):
                     return None
     return {"output": str(path), "output_sha256": actual["sha256"],
-            "plan_key": plan_key(fresh, donor, match), "recovered": True}
+            "plan_key": plan_key(fresh, donor, match), "recovered": True,
+            "excluded_stems": match.canonical_excluded_stems(donor["excluded_stems"])}

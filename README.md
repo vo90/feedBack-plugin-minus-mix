@@ -15,7 +15,7 @@ several of them together. It works on one song at a time or on a whole folder.
 - [What you need](#what-you-need)
 - [Install MinusMix](#install-minusmix)
 - [Create your first MinusMix song](#create-your-first-minusmix-song)
-- [Reuse existing No Guitar audio](#reuse-existing-no-guitar-audio)
+- [Reuse existing MinusMix audio](#reuse-existing-minusmix-audio)
 - [Troubleshooting](#troubleshooting)
 - [Technical details](#technical-details)
 
@@ -42,12 +42,20 @@ The separation is produced by an AI audio model, so it will not be perfect on
 every recording. Faint bleed or small changes to other sounds can remain. This
 is normal for source separation and does not affect the original song.
 
-## Reuse existing No Guitar audio
+## Reuse existing MinusMix audio
 
-After reconverting or repairing your ordinary FeedPaks, open **Reuse No Guitar audio**
-in MinusMix. Choose three separate, non-overlapping folders: your existing No Guitar
+After reconverting or repairing your ordinary FeedPaks, open **Reuse existing MinusMix audio**
+in MinusMix. Choose three separate, non-overlapping folders: your existing MinusMix
 FeedPaks, the fresh ordinary FeedPaks, and a new output folder. Scan and review the
 matches, then create the new copies. Both input folders remain read-only.
+
+The existing folder can mix any supported removed-stem combinations: No Guitar,
+No Vocals, No Guitar + Vocals, and others. Scan reads each donor's saved MinusMix
+metadata automatically; there is no batch-wide stem selection. Each compatible
+combination produces a separate output with the normal MinusMix title and filename
+suffix. The review shows its variant and counts input song packages separately
+from output variants. Missing or invalid removed-stem metadata is reported, not
+guessed from a filename.
 
 This mode copies the existing finished backing track and its preview byte-for-byte.
 It uses the fresh package's charts, artwork, lyrics and other assets. It never starts
@@ -62,9 +70,11 @@ conversion fixes. Filenames alone never establish a match. Exported songs from
 RS1 compilation archives work the same way as other FeedPaks; select their exported
 folder, not the PSARC file. One donor can supply several matching fresh packages.
 
-Different compatible backing tracks appear as recording choices. Choose once for
-all matching targets, or skip the group. Identical audio/preview copies collapse
-automatically. Unreadable donors are reported; automatic uniqueness means uniqueness
+Different compatible backing tracks for the same removed-stem combination appear
+as recording choices. Choose once for that variant's matching targets, or skip
+that group. Identical audio/preview copies collapse within the same variant;
+different removed-stem combinations remain separate even when their bytes match.
+Unreadable donors are reported; automatic uniqueness means uniqueness
 among the readable compatible donors. Legacy MinusMix packages do not contain an
 original-recording hash, so these checks establish chart/timing compatibility,
 not cryptographic proof of the recording master. Materially changed or insufficient
@@ -82,6 +92,10 @@ Inputs changed since the preview require a new scan. Existing different output
 files are never replaced. Output manifests retain content hashes and a reuse receipt;
 edited outputs are reported instead of being overwritten. A new scan replaces the
 previous job's saved review, so resume that job before starting another scan.
+
+Previews saved by the earlier No Guitar-only reuse version require one new scan.
+They are not resumed as mixed-variant jobs. Their saved records are retained, and
+existing source packages and output files are preserved.
 
 ## Why use MinusMix instead of muting a stem?
 

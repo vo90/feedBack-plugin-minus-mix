@@ -23,7 +23,7 @@ def chart():
 
 def package(path, *, donor=False, document=None, audio=b"encoded backing audio",
             preview=b"encoded preview", title="Song", artist="Artist", duration=15.0,
-            extras=None, manifest_changes=None):
+            extras=None, manifest_changes=None, excluded_stems=None):
     path.parent.mkdir(parents=True, exist_ok=True)
     manifest = {"feedpak_version": "1.14.0", "title": title, "artist": artist,
                 "duration": duration, "album": "Album", "year": 2000,
@@ -32,8 +32,9 @@ def package(path, *, donor=False, document=None, audio=b"encoded backing audio",
                 "stems": [{"id": "full", "file": "stems/full.ogg", "codec": "vorbis", "default": True}],
                 "cover": "cover.png"}
     if donor:
-        manifest["title"] += " (No Guitar)"
-        manifest["minus_mix"] = {"source_title": title, "excluded_stems": ["guitar"], "generator": "minus_mix"}
+        excluded = ["guitar"] if excluded_stems is None else excluded_stems
+        manifest["title"] += " (" + exporter._suffix(excluded) + ")"
+        manifest["minus_mix"] = {"source_title": title, "excluded_stems": excluded, "generator": "minus_mix"}
     if preview is not None:
         manifest["preview"] = "preview.ogg"
     manifest.update(manifest_changes or {})

@@ -17,7 +17,7 @@
   <div class="pmx-tabs" role="tablist" aria-label="Export mode">
     <button id="pmx-mode-single" class="pmx-tab active" type="button" role="tab" aria-selected="true" aria-controls="pmx-single-panel" tabindex="0">Single song</button>
     <button id="pmx-mode-batch" class="pmx-tab" type="button" role="tab" aria-selected="false" aria-controls="pmx-batch-panel" tabindex="-1">Batch folder</button>
-    <button id="pmx-mode-reuse" class="pmx-tab" type="button" role="tab" aria-selected="false" aria-controls="pmx-reuse-panel" tabindex="-1">Reuse No Guitar audio</button>
+    <button id="pmx-mode-reuse" class="pmx-tab" type="button" role="tab" aria-selected="false" aria-controls="pmx-reuse-panel" tabindex="-1">Reuse existing MinusMix audio</button>
   </div>
 
   <div id="pmx-single-panel" role="tabpanel" aria-labelledby="pmx-mode-single">
@@ -180,12 +180,13 @@
   <div id="pmx-reuse-panel" role="tabpanel" aria-labelledby="pmx-mode-reuse" hidden>
     <section class="pmx-batch-intro">
       <h2>Keep finished audio with your current charts</h2>
-      <p>Create new No Guitar FeedPaks using audio already saved in older MinusMix packages. Charts and other song files come from your current packages. Audio is copied without another separation or encode.</p>
+      <p>Create new FeedPaks using audio already saved in older MinusMix packages. A mixed folder can contain No Guitar, No Vocals, or combined variants. Each compatible removed-stem combination becomes a separate output, named from its saved MinusMix metadata. Charts and other song files come from your current packages. Audio is copied without another separation or encode.</p>
       <p class="pmx-help">Matching compares song identity and playable note timing. Older packages do not identify the original recording by audio hash, so review version choices before creating files.</p>
     </section>
     <section class="pmx-card"><div class="pmx-step">1</div><div class="pmx-content">
-      <label for="pmx-reuse-old">Existing No Guitar packages</label>
-      <div class="pmx-row"><input id="pmx-reuse-old" type="text" readonly placeholder="Choose the folder with finished No Guitar audio"><button id="pmx-reuse-old-browse" class="pmx-button pmx-secondary" type="button">Choose folder…</button></div>
+      <label for="pmx-reuse-old">Existing MinusMix packages</label>
+      <div class="pmx-row"><input id="pmx-reuse-old" type="text" readonly placeholder="Choose a folder with finished MinusMix variants"><button id="pmx-reuse-old-browse" class="pmx-button pmx-secondary" type="button">Choose folder…</button></div>
+      <p class="pmx-help">Variants are detected automatically. Different recordings of the same variant require a choice. Missing or invalid removed-stem metadata is reported for review.</p>
     </div></section>
     <section class="pmx-card"><div class="pmx-step">2</div><div class="pmx-content">
       <label for="pmx-reuse-fresh">Current original packages</label>

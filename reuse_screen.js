@@ -1,4 +1,4 @@
-/* Existing No Guitar audio: explicit review, bounded pages, no automatic writes. */
+/* Existing MinusMix audio: explicit review, bounded pages, no automatic writes. */
 (function (root) {
   'use strict';
 
@@ -23,6 +23,11 @@
         && ['canceled', 'interrupted', 'completed', 'failed'].indexOf(job.status) >= 0,
       cancel: !busy && active && job.status !== 'canceling',
     };
+  }
+
+  function variantText(item) {
+    return item.variant_label || (Array.isArray(item.excluded_stems) && item.excluded_stems.length
+      ? 'Removed stems: ' + item.excluded_stems.join(', ') : '');
   }
 
   function createClient(request) {
@@ -99,8 +104,9 @@
       ((job && job.groups) || []).forEach(function (group) {
         var card = element('section', null, 'pmx-reuse-choice');
         card.appendChild(element('strong', group.title || 'Choose a compatible audio version'));
-        card.appendChild(element('p', (group.targets_count || 1) + ' current package(s). ' + (group.reason || ''), 'pmx-help'));
-        var label = element('label', 'Existing No Guitar version');
+        if (variantText(group)) card.appendChild(element('p', 'Variant: ' + variantText(group), 'pmx-help'));
+        card.appendChild(element('p', (group.targets_count || 1) + ' output variant(s). ' + (group.reason || ''), 'pmx-help'));
+        var label = element('label', 'Existing MinusMix version');
         var select = element('select');
         var first = element('option', 'Choose a version or skip this group'); first.value = ''; select.appendChild(first);
         (group.candidates || []).forEach(function (candidate) {
@@ -126,11 +132,13 @@
       var counts = (job && job.counts) || {};
       text('headline', job ? 'Audio reuse — ' + job.status : 'Choose your three folders');
       var detail = dirty ? 'Folder or worker settings changed. Scan again before creating files.'
-        : job ? job.detail || '' : 'Scan compares current charts with existing No Guitar packages. Review the matches before creating files.';
+        : job ? job.detail || '' : 'Scan compares current charts with existing MinusMix packages and reads their removed-stem variants. Review the matches before creating files.';
       if (job && job.journal_warning) detail += ' Recovery warning: ' + job.journal_warning;
       text('detail', detail);
-      text('counts', ['total', 'ready', 'review', 'blocked', 'done', 'failed', 'skipped']
-        .map(function (key) { return key + ': ' + Number(counts[key] || 0); }).join(' · '));
+      var totals = ['Input song packages: ' + Number(job && job.input_packages_total || 0),
+        'Output variants: ' + Number(job && job.output_variants_total || 0)];
+      text('counts', totals.concat(['ready', 'review', 'blocked', 'done', 'failed', 'skipped']
+        .map(function (key) { return key + ': ' + Number(counts[key] || 0); })).join(' · '));
       var resources = (job && job.resources) || {};
       text('resources', resources.effective_workers ? 'Workers: ' + resources.effective_workers
         + ' (requested ' + (resources.requested_workers || 'Auto') + '). ' + (resources.reason || '') : 'Auto adapts to CPU, available memory and storage. Manual values are maximums.');
@@ -142,13 +150,14 @@
         row.appendChild(element('b', item.status));
         var description = element('div', item.title || item.relative_path);
         description.appendChild(element('small', item.relative_path || ''));
+        if (variantText(item)) description.appendChild(element('small', 'Variant: ' + variantText(item)));
         if (item.donor_relative) description.appendChild(element('small', 'Audio: ' + item.donor_relative));
         if (item.output_relative) description.appendChild(element('small', 'Output: ' + item.output_relative));
         if (item.reason) description.appendChild(element('small', item.reason));
         row.appendChild(description); list.appendChild(row);
       });
       var total = Number(job && job.items_total) || 0;
-      text('page', total ? 'Showing ' + (offset + 1) + '–' + Math.min(offset + 100, total) + ' of ' + total : 'No package rows yet');
+      text('page', total ? 'Showing rows ' + (offset + 1) + '–' + Math.min(offset + 100, total) + ' of ' + total : 'No review rows yet');
       var errors = $('errors'); errors.replaceChildren();
       ((job && job.source_errors) || []).forEach(function (error) {
         errors.appendChild(element('p', (error.relative_path || '') + ': ' + (error.reason || 'Could not inspect this source')));
