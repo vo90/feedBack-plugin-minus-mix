@@ -207,6 +207,10 @@
     <div id="pmx-reuse-status" class="pmx-status" role="status" aria-live="polite"></div>
     <section class="pmx-batch-progress">
       <div class="pmx-progress-heading"><strong id="pmx-reuse-counts" aria-live="polite"></strong><div class="pmx-actions"><button id="pmx-reuse-refresh" class="pmx-button pmx-secondary" type="button">Refresh</button><button id="pmx-reuse-cancel" class="pmx-button pmx-danger" type="button" hidden>Cancel safely</button></div></div>
+      <div id="pmx-reuse-phase" class="pmx-reuse-phase" hidden>
+        <div class="pmx-reuse-phase-heading" role="status" aria-live="polite"><strong id="pmx-reuse-phase-label"></strong><span id="pmx-reuse-phase-count"></span></div>
+        <p id="pmx-reuse-phase-metrics" class="pmx-help" aria-live="off"></p>
+      </div>
       <progress id="pmx-reuse-bar" max="1" value="0" aria-label="Existing-audio reuse progress"></progress>
       <div id="pmx-reuse-groups" aria-label="Audio versions requiring a choice"></div>
       <div id="pmx-reuse-items" class="pmx-batch-items"></div>

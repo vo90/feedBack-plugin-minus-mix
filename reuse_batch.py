@@ -43,6 +43,7 @@ class ReuseManager:
         self._plan_bytes = 0
         self._working = False
         self._worker_phase = None
+        self._progress_meter = None
         self._load()
 
     def _load(self):
@@ -59,6 +60,9 @@ class ReuseManager:
             state = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(state)
             state.validate(data, self.match.POLICY, self.match.MAX_FILES, self.match.MAX_OUTPUT_ROWS)
+            saved_progress = self.support.PhaseProgress.restore(data.pop("phase_progress", None))
+            if saved_progress is not None:
+                data["phase_progress"] = saved_progress
             self._replay(data)
             for row in data["items"]:
                 if row["status"] == "done" and not self._receipt_valid(data, row, row.get("receipt")):
@@ -66,6 +70,10 @@ class ReuseManager:
                                reason="Saved completion receipt is invalid; the output must be verified on resume.")
                     row.pop("receipt", None)
             if data.get("status") in ACTIVE:
+                # Per-file receipts survive a crash, but live timing counters
+                # are not journaled. Do not present an old phase snapshot as
+                # current progress; Resume starts a fresh measured operation.
+                data.pop("phase_progress", None)
                 data["status"] = "interrupted"
                 data["detail"] = "Interrupted. Review and resume; completed outputs will be verified."
                 for row in data["items"]:
@@ -81,6 +89,7 @@ class ReuseManager:
         # older parallel worker snapshot can never replace newer receipts.
         with self.persist_lock:
             with self.lock:
+                self._snapshot_progress()
                 payload = json.dumps(self.job, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
             if len(payload) > MAX_CHECKPOINT_BYTES:
                 raise PreviewLimitError("The saved job exceeds its size limit; use smaller input folders.")
@@ -200,7 +209,25 @@ class ReuseManager:
                 result["detail"] = self._summary(job, result["status"])
             terminal = sum(counts[key] for key in ("done", "failed", "blocked", "skipped"))
             result["progress"] = terminal / max(1, counts["total"])
+            if self._progress_meter is not None:
+                result["phase_progress"] = self._progress_meter.snapshot()
             return copy.deepcopy(result)
+
+    def _begin_phase(self, phase, label, total=None):
+        with self.lock:
+            self._progress_meter = self.support.PhaseProgress(phase, label, total)
+            self._snapshot_progress()
+
+    def _advance_phase(self):
+        with self.lock:
+            if self._progress_meter is not None:
+                self._progress_meter.advance()
+
+    def _snapshot_progress(self, *, finish=False):
+        if self._progress_meter is not None:
+            if finish:
+                self._progress_meter.finish()
+            self.job["phase_progress"] = self._progress_meter.snapshot()
 
     @staticmethod
     def _counts(job):
@@ -252,6 +279,7 @@ class ReuseManager:
                     self.job.update(status="failed", detail=f"Could not finish saving this job: {exc}"[:500])
             finally:
                 with self.lock:
+                    self._snapshot_progress(finish=True)
                     self._working = False
 
         thread = threading.Thread(target=execute, name="minusmix-audio-reuse", daemon=True)
@@ -259,6 +287,7 @@ class ReuseManager:
             thread.start()
         except Exception:
             with self.lock:
+                self._snapshot_progress(finish=True)
                 self._working = False
                 self.job.update(status="failed", detail="The background worker could not start.")
             self._persist()
@@ -269,6 +298,7 @@ class ReuseManager:
             self._persist()
         except (OSError, ValueError, TypeError) as exc:
             with self.lock:
+                self._snapshot_progress(finish=True)
                 self.job.update(status="failed", detail=f"Job did not start: checkpoint could not be saved ({exc}).")
             raise self.match.ReuseError("Job did not start because its checkpoint could not be saved.") from exc
 
@@ -297,6 +327,7 @@ class ReuseManager:
                         "_workers": workers, "_scan_complete": False}
             self._plan_bytes = 4096 + len(json.dumps(self.job, ensure_ascii=False).encode("utf-8"))
             job_id = self.job["id"]
+            self._begin_phase("discovery", "Finding input files")
         self._persist_start()
         self._launch(self._scan)
         return self.get(job_id)
@@ -346,8 +377,18 @@ class ReuseManager:
             with self.lock:
                 self.job["resources"] = resources
             workers = min(4, resources["effective_workers"])
+            # Count lightweight directory entries once, without opening packages.
+            # The bounded inventories give every phase a stable denominator.
+            inventories = []
+            for root in (old, fresh):
+                entries = []
+                for entry in self.support.walk(root, match=self.match, cancel=self._cancel):
+                    entries.append(entry)
+                    self._advance_phase()
+                inventories.append(entries)
+            self._begin_phase("read_existing", "Reading existing mixes", len(inventories[0]))
             for relative, info, error in self._bounded(
-                self.support.walk(old, match=self.match, cancel=self._cancel),
+                inventories[0],
                 lambda entry: self._inspect(entry, True), workers,
             ):
                 with self.lock:
@@ -359,16 +400,19 @@ class ReuseManager:
                         self._account_plan(failure)
                         self.job["source_errors"].append(failure)
                     self.job["detail"] = f"Read existing audio: {relative}"
+                    self._advance_phase()
             by_identity = {}
             for info in self.job["_donors"].values():
                 by_identity.setdefault(tuple(info["identity"]), []).append(info)
+            self._begin_phase("read_fresh", "Reading current packages", len(inventories[1]))
             for relative, info, error in self._bounded(
-                self.support.walk(fresh, match=self.match, cancel=self._cancel),
+                inventories[1],
                 lambda entry: self._inspect(entry, False), workers,
             ):
                 with self.lock:
                     self.job["input_packages_total"] += 1
                     self._add_row(relative, info, error, by_identity)
+                    self._advance_phase()
             with self.lock:
                 self.job["items"].sort(key=lambda row: (row["relative_path"].casefold(), row["excluded_stems"]))
                 self._reserve_outputs()
@@ -376,6 +420,7 @@ class ReuseManager:
             self._verify_existing_rows(self.job["items"], workers)
             with self.lock:
                 self.job.update(status="ready", detail=self._summary(self.job, "ready"), _scan_complete=True)
+                self._snapshot_progress(finish=True)
             self._persist()
         except Exception as exc:
             with self.lock:
@@ -384,12 +429,14 @@ class ReuseManager:
                     # A partial oversized preview cannot authorize any output.
                     self.job.update(items=[], groups={}, _donors={})
                 self.job.update(status="canceled" if self.event.is_set() else "failed", detail=str(exc)[:500])
+                self._snapshot_progress(finish=True)
             self._persist()
 
     def _verify_existing_rows(self, rows, workers):
-        selected = (row for row in rows if row["status"] == "ready" and row["donor_relative"])
+        selected = [row for row in rows if row["status"] == "ready" and row["donor_relative"]]
+        self._begin_phase("check_outputs", "Checking outputs", len(selected))
         for _ in self._bounded(selected, self._preview_existing, workers):
-            pass
+            self._advance_phase()
 
     def _preview_existing(self, row):
         try:
@@ -435,6 +482,8 @@ class ReuseManager:
             with self.lock:
                 self.job.update(status="canceled" if self.event.is_set() else "failed", detail=str(exc)[:500])
         finally:
+            with self.lock:
+                self._snapshot_progress(finish=True)
             self._persist()
 
     def _add_row(self, relative, info, error, by_identity):
@@ -567,6 +616,7 @@ class ReuseManager:
                 changed.append(row)
             self.event = threading.Event()
             job.update(status="scanning", detail="Checking existing outputs for the chosen recordings.")
+            self._begin_phase("check_outputs", "Checking outputs", sum(row["status"] == "ready" for row in changed))
         self._persist_start()
         self._launch(lambda: self._check_choices(changed))
         return self.get(job_id)
@@ -582,6 +632,8 @@ class ReuseManager:
             self.event = threading.Event()
             self._guard()
             job.update(status="running", detail="Rechecking selected inputs and creating new packages.")
+            self._begin_phase("apply", "Creating FeedPaks", sum(
+                row["status"] in ("ready", "failed", "done") and bool(row["donor_relative"]) for row in job["items"]))
         self._persist_start()
         self._launch(self._run)
         return self.get(job_id)
@@ -714,7 +766,7 @@ class ReuseManager:
                     yield row
 
             for _ in self._bounded(admitted_rows(), self._process, resources["effective_workers"]):
-                pass
+                self._advance_phase()
             with self.lock:
                 if all(row["status"] == "done" for row in rows):
                     self.job.pop("journal_warning", None)
@@ -726,4 +778,5 @@ class ReuseManager:
             with self.lock:
                 self._snapshots.clear()
                 self._snapshot_bytes = 0
+                self._snapshot_progress(finish=True)
             self._persist()

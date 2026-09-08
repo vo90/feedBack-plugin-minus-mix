@@ -3,7 +3,12 @@ const fs = require('node:fs');
 const ui = require('../assets/reuse_screen.js');
 
 class Node {
-  constructor(tag = 'div') { this.tag = tag; this.value = ''; this.childNodes = []; this.listeners = {}; this.disabled = false; }
+  constructor(tag = 'div') { this.tag = tag; this.attributes = {}; this.value = ''; this.childNodes = []; this.listeners = {}; this.disabled = false; }
+  set value(value) { this._value = value; this.attributes.value = String(value); }
+  get value() { return this._value; }
+  setAttribute(name, value) { this.attributes[name] = String(value); }
+  removeAttribute(name) { delete this.attributes[name]; if (name === 'value') this._value = 0; }
+  hasAttribute(name) { return Object.hasOwn(this.attributes, name); }
   appendChild(node) { this.childNodes.push(node); return node; }
   replaceChildren(...nodes) { this.childNodes = nodes; }
   addEventListener(name, callback) { (this.listeners[name] ||= []).push(callback); }
@@ -38,8 +43,108 @@ const reviewed = { id: 'job', status: 'ready', detail: 'Review proposed output',
 const ambiguous = { ...reviewed, counts: { total: 1, ready: 0, review: 1 }, groups: [
   { id: 'group', title: 'Song', targets_count: 1, excluded_stems: ['guitar'], variant_label: 'No Guitar',
     candidates: [{ id: 'old/song.feedpak', relative_path: 'old/song.feedpak', full_sha256: 'a'.repeat(64) }] }] };
+const phaseProgress = { phase: 'reading_existing', label: 'Reading existing mixes', processed: 0, total: 1,
+  elapsed_seconds: 0, files_per_second: null, eta_seconds: null, fraction: 0, active: true };
+
+async function progressChecks() {
+  const discovery = environment({ ...reviewed, status: 'scanning', phase_progress: {
+    ...phaseProgress, phase: 'discovering', label: 'Finding input files', total: null, fraction: null } });
+  await discovery.controller.show();
+  assert.equal(node(discovery, 'phase').hidden, false);
+  assert.equal(node(discovery, 'phase-label').textContent, 'Finding input files');
+  assert.equal(node(discovery, 'phase-count').textContent, '0 files found · Counting files…');
+  assert.equal(node(discovery, 'bar').hasAttribute('value'), false, 'Unknown discovery totals use a native indeterminate bar');
+  assert.equal(node(discovery, 'phase-metrics').textContent, 'Phase elapsed: 0s · Estimating speed…');
+  assert(!node(discovery, 'phase-count').textContent.includes('%'), 'Discovery must not invent a percentage');
+  discovery.setJob({ ...reviewed, status: 'scanning', phase_progress: { ...phaseProgress, processed: 1,
+    total: null, fraction: null, elapsed_seconds: 1, files_per_second: 1, eta_seconds: 40 } });
+  await discovery.controller.refresh();
+  assert.equal(node(discovery, 'bar').hasAttribute('value'), false);
+  assert.equal(node(discovery, 'phase-metrics').textContent, 'Phase elapsed: 1s · 1.00 files/s',
+    'Discovery never uses an ETA until its total is known');
+  discovery.setJob({ ...reviewed, status: 'failed', phase_progress: { ...phaseProgress,
+    processed: 1, total: null, fraction: null, active: false, elapsed_seconds: 1 } });
+  await discovery.controller.refresh();
+  assert.equal(node(discovery, 'phase-count').textContent, '1 file found · Total not determined');
+  assert.equal(node(discovery, 'bar').hidden, true, 'Stopped discovery must not keep an animated indeterminate bar');
+  assert.equal(node(discovery, 'phase-metrics').textContent, 'Phase elapsed: 1s');
+  discovery.controller.hide();
+
+  const small = environment({ ...reviewed, status: 'scanning', phase_progress: phaseProgress });
+  await small.controller.show();
+  assert.equal(node(small, 'phase-count').textContent, '0 / 1 file · 0%');
+  assert.equal(node(small, 'bar').value, 0);
+  assert.equal(node(small, 'bar').hasAttribute('value'), true, 'One-file jobs have the same determinate progress as large jobs');
+  assert.equal(node(small, 'phase-metrics').textContent, 'Phase elapsed: 0s · Estimating remaining time…');
+  small.setJob({ ...reviewed, phase_progress: { ...phaseProgress, processed: 1, fraction: 1,
+    active: false, elapsed_seconds: 0.25, files_per_second: null } });
+  await small.controller.refresh();
+  assert.equal(node(small, 'phase-count').textContent, '1 / 1 file · 100%');
+  assert.equal(node(small, 'phase-metrics').textContent, 'Phase elapsed: 0s', 'Quick completed jobs need no invented rate or ETA');
+  small.controller.hide();
+
+  const empty = environment({ ...reviewed, items: [], items_total: 0, counts: {}, phase_progress: {
+    ...phaseProgress, total: 0, fraction: 1, active: false, elapsed_seconds: 0.01 } });
+  await empty.controller.show();
+  assert.equal(node(empty, 'phase-count').textContent, '0 / 0 files · 100%');
+  assert.equal(node(empty, 'bar').value, 1, 'An empty completed phase is complete without division by zero');
+  assert.equal(node(empty, 'phase-metrics').textContent, 'Phase elapsed: 0s');
+  empty.controller.hide();
+
+  const largePhase = { ...phaseProgress, processed: 1250, total: 4000, fraction: 0.3125,
+    elapsed_seconds: 625, files_per_second: 2, eta_seconds: 1375 };
+  const large = environment({ ...reviewed, status: 'scanning', items_total: 4000, phase_progress: largePhase },
+    (path, options, getJob) => {
+      if (path.includes('offset=100')) return Promise.resolve({ ...getJob(), offset: 100,
+        items: [{ ...reviewed.items[0], title: 'Second review page' }] });
+    });
+  await large.controller.show();
+  assert.equal(node(large, 'phase-count').textContent, '1,250 / 4,000 files · 31%');
+  assert.equal(node(large, 'bar').value, 0.3125);
+  assert.equal(node(large, 'phase-metrics').textContent,
+    'Phase elapsed: 10m 25s · 2.00 files/s · Approx. remaining in this phase: 22m 55s');
+  node(large, 'next').fire('click'); await tick();
+  assert.equal(node(large, 'page').textContent, 'Showing rows 101–200 of 4000');
+  assert.equal(node(large, 'phase-count').textContent, '1,250 / 4,000 files · 31%',
+    'Paging review rows must not change global phase counts');
+  assert.equal(node(large, 'bar').value, 0.3125);
+  large.controller.hide();
+
+  for (const status of ['ready', 'completed', 'canceled', 'interrupted', 'failed']) {
+    const stopped = environment({ ...reviewed, status, phase_progress: { ...largePhase, active: false } });
+    await stopped.controller.show();
+    assert.equal(node(stopped, 'phase-metrics').textContent, 'Phase elapsed: 10m 25s · 2.00 files/s',
+      status + ' has a frozen phase duration and measured speed, without an active ETA');
+    const before = node(stopped, 'phase-metrics').textContent;
+    await stopped.controller.refresh();
+    assert.equal(node(stopped, 'phase-metrics').textContent, before, 'Refreshing a stopped snapshot never advances its clock');
+    stopped.setJob({ ...reviewed, status, phase_progress: largePhase });
+    await stopped.controller.refresh();
+    assert.equal(node(stopped, 'phase-metrics').textContent, before, 'Terminal job status suppresses stale active-phase ETA');
+    stopped.controller.hide();
+  }
+
+  const resumed = environment({ ...reviewed, status: 'running', progress: 0.75, counts: { done: 3000, ready: 1000 },
+    phase_progress: { ...phaseProgress, phase: 'creating', label: 'Creating FeedPaks', total: 1000 } });
+  await resumed.controller.show();
+  assert.equal(node(resumed, 'phase-count').textContent, '0 / 1,000 files · 0%');
+  assert.equal(node(resumed, 'bar').value, 0, 'Resume measures this Apply phase independently from historical completed files');
+  assert.equal(node(resumed, 'phase-metrics').textContent, 'Phase elapsed: 0s · Estimating remaining time…');
+  resumed.controller.hide();
+
+  for (const status of ['scanning', 'running', 'ready', 'interrupted']) {
+    const old = environment({ ...reviewed, status, progress: 0.5 });
+    await old.controller.show();
+    assert.equal(node(old, 'phase').hidden, true, 'Old snapshots do not invent unavailable measurements');
+    if (status === 'scanning') assert.equal(node(old, 'bar').hasAttribute('value'), false);
+    else assert.equal(node(old, 'bar').value, status === 'ready' ? 1 : 0.5);
+    assert(node(old, 'counts').textContent.includes('ready: 1'), 'Old checkpoint counters remain usable');
+    old.controller.hide();
+  }
+}
 
 async function main() {
+  await progressChecks();
   assert.equal(ui.workerSetting('auto'), 'auto');
   assert.equal(ui.workerSetting('16'), 16);
   assert.equal(ui.workerSetting('17'), 'auto');

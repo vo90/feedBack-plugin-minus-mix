@@ -6,7 +6,55 @@ import json
 import os
 import shutil
 import subprocess
+import time
 from pathlib import Path
+
+
+class PhaseProgress:
+    """Cheap per-phase counters; estimates never include review or offline time."""
+
+    def __init__(self, phase, label, total=None, clock=None):
+        self.phase, self.label, self.total = phase, label, total
+        self.clock = clock or time.monotonic
+        self.started = self.clock()
+        self.processed, self.elapsed, self.active = 0, 0.0, True
+
+    def advance(self):
+        self.processed += 1
+
+    def finish(self):
+        if self.active:
+            self.elapsed = max(0.0, self.clock() - self.started)
+            self.active = False
+
+    def snapshot(self):
+        elapsed = max(0.0, self.clock() - self.started) if self.active else self.elapsed
+        rate = self.processed / elapsed if self.processed and elapsed >= 2.0 else None
+        fraction = None if self.total is None else min(1.0, self.processed / self.total) if self.total else 1.0
+        eta = None
+        if self.active and self.total is not None:
+            remaining = max(0, self.total - self.processed)
+            eta = remaining / rate if rate else 0.0 if not remaining else None
+        return {"phase": self.phase, "label": self.label, "processed": self.processed,
+                "total": self.total, "elapsed_seconds": elapsed, "files_per_second": rate,
+                "eta_seconds": eta, "fraction": fraction, "active": self.active}
+
+    @classmethod
+    def restore(cls, value):
+        # Progress is optional display metadata, never an authorization receipt.
+        # Discard invalid old metadata without losing the reviewed job itself.
+        if not isinstance(value, dict):
+            return None
+        phase, label = value.get("phase"), value.get("label")
+        done, total, elapsed = value.get("processed"), value.get("total"), value.get("elapsed_seconds")
+        if (not all(isinstance(text, str) and 0 < len(text) <= 120 for text in (phase, label))
+                or type(done) is not int or not 0 <= done <= 50_000
+                or (total is not None and (type(total) is not int or not done <= total <= 50_000))
+                or type(elapsed) not in (int, float) or not 0 <= elapsed <= 1e12):
+            return None
+        meter = cls(phase, label, total, clock=lambda: 0)
+        meter.processed, meter.elapsed, meter.active = done, elapsed, False
+        return meter.snapshot()
 
 
 def inside(path, root):

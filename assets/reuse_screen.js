@@ -30,6 +30,17 @@
       ? 'Removed stems: ' + item.excluded_stems.join(', ') : '');
   }
 
+  function durationText(value) {
+    var seconds = finiteNumber(value) ? Math.floor(value) : 0;
+    var hours = Math.floor(seconds / 3600), minutes = Math.floor(seconds % 3600 / 60);
+    if (hours) return hours + 'h ' + minutes + 'm';
+    return minutes ? minutes + 'm ' + String(seconds % 60).padStart(2, '0') + 's' : seconds + 's';
+  }
+
+  function finiteNumber(value) {
+    return typeof value === 'number' && Number.isFinite(value) && value >= 0;
+  }
+
   function createClient(request) {
     function post(path, value) {
       return request('/reuse' + path, { method: 'POST',
@@ -128,6 +139,46 @@
         card.appendChild(choose); target.appendChild(card);
       });
     }
+    function renderProgress() {
+      var phase = job && job.phase_progress;
+      var hasPhase = phase && typeof phase === 'object' && typeof phase.label === 'string';
+      $('phase').hidden = !hasPhase;
+      $('bar').hidden = false;
+      if (!hasPhase) {
+        if (job && job.status === 'scanning') $('bar').removeAttribute('value');
+        else $('bar').value = job && job.status === 'ready' ? 1
+          : Math.max(0, Math.min(1, Number(job && job.progress) || 0));
+        $('bar').setAttribute('aria-label', 'Existing-audio reuse progress');
+        return;
+      }
+      var known = finiteNumber(phase.total);
+      var processed = finiteNumber(phase.processed) ? Math.floor(phase.processed) : 0;
+      var total = known ? Math.floor(phase.total) : null;
+      var fraction = known ? (finiteNumber(phase.fraction) ? phase.fraction
+        : total ? processed / total : 1) : null;
+      if (known) fraction = Math.max(0, Math.min(1, fraction));
+      var active = phase.active === true && jobActions(job).active;
+      var pending = active && (!known || processed < total);
+      text('phase-label', phase.label);
+      text('phase-count', processed.toLocaleString('en-US') + (known
+        ? ' / ' + total.toLocaleString('en-US') + (total === 1 ? ' file · ' : ' files · ') + Math.round(fraction * 100) + '%'
+        : (processed === 1 ? ' file found · ' : ' files found · ') + (active ? 'Counting files…' : 'Total not determined')));
+      if (known) $('bar').value = fraction;
+      else $('bar').removeAttribute('value');
+      // Discovery can stop before a total exists; keep its count without an animated bar.
+      $('bar').hidden = !known && !active;
+      $('bar').setAttribute('aria-label', phase.label + ' progress');
+      var metrics = ['Phase elapsed: ' + durationText(phase.elapsed_seconds)];
+      var rate = finiteNumber(phase.files_per_second) && phase.files_per_second > 0
+        ? phase.files_per_second : null;
+      if (rate !== null) metrics.push((rate < 0.01 ? '<0.01' : rate.toFixed(2)) + ' files/s');
+      if (pending && known && finiteNumber(phase.eta_seconds)) {
+        metrics.push('Approx. remaining in this phase: ' + durationText(Math.ceil(phase.eta_seconds)));
+      } else if (pending && (known || rate === null)) {
+        metrics.push(known ? 'Estimating remaining time…' : 'Estimating speed…');
+      }
+      text('phase-metrics', metrics.join(' · '));
+    }
     function render() {
       var counts = (job && job.counts) || {};
       text('headline', job ? 'Audio reuse — ' + job.status : 'Choose your three folders');
@@ -143,8 +194,7 @@
       var resources = (job && job.resources) || {};
       text('resources', resources.effective_workers ? 'Workers: ' + resources.effective_workers
         + ' (requested ' + (resources.requested_workers || 'Auto') + '). ' + (resources.reason || '') : 'Auto adapts to CPU, available memory and storage. Manual values are maximums.');
-      $('bar').value = job && job.status === 'ready' ? 1
-        : Math.max(0, Math.min(1, Number(job && job.progress) || 0));
+      renderProgress();
       var list = $('items'); list.replaceChildren();
       ((job && job.items) || []).forEach(function (item) {
         var row = element('div', null, 'pmx-batch-item');

@@ -93,6 +93,18 @@ Progress shows the effective count. Copies stream directly between archives and
 do not accumulate separated stems or decoded audio in a cache. Available disk
 space and memory are checked before more work starts.
 
+Progress works the same way for every library size. It shows the current phase:
+finding input files, reading existing mixes, reading current packages, checking
+outputs, or creating FeedPaks. Once a phase's total is known, the bar shows
+processed files out of the total and a percentage. File discovery uses an
+indeterminate bar while it counts files. Phase elapsed time and files per second
+are shown, with approximate time remaining for that phase once enough work has
+completed to estimate it. The estimate is not a whole-job completion time: phases
+read different amounts of data. Each phase and each resumed Apply starts its own
+measurement. Finished or stopped phases retain their elapsed time without a live
+countdown. Saved jobs from older versions keep their existing counters until a
+new scan or Apply provides phase measurements.
+
 Cancel stops at copy checkpoints and preserves finished outputs. After restarting
 the app, use **Resume** to verify completed copies and continue unfinished ones.
 Inputs changed since the preview require a new scan. Existing different output
