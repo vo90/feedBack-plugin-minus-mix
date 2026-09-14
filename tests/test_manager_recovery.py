@@ -262,6 +262,46 @@ def test_batch_service_block_preserves_pending_rows_and_retry_skips_done(tmp_pat
     assert len(list(output.glob("*.feedpak"))) == 3
 
 
+@pytest.mark.parametrize("state", ["missing_model", "recovery_exhausted", "endpoint_changed"])
+def test_batch_remains_active_until_blocked_history_is_saved(tmp_path, monkeypatch, state):
+    service = ControlledService(wait_on=2, failure=ServiceBlock(state))
+    service.release.set()
+    manager, options, _output = _batch_case(tmp_path, service)
+    saving, release = threading.Event(), threading.Event()
+    workers = []
+    original_persist = manager._persist
+
+    def delayed_persist(force=False):
+        if manager.latest()["status"] == "blocked" and not saving.is_set():
+            workers.append(threading.current_thread())
+            saving.set()
+            assert release.wait(3.0)
+        original_persist(force=force)
+
+    monkeypatch.setattr(manager, "_persist", delayed_persist)
+    started = manager.start(**options)
+    try:
+        assert saving.wait(3.0)
+        assert manager.get(started["id"])["status"] == "blocked"
+        saved = json.loads(manager.state_file.read_text(encoding="utf-8"))["jobs"]
+        assert saved[-1]["status"] == "running"
+        # Terminal status is visible while the worker still owns its final save.
+        assert manager.is_active()
+        with pytest.raises(batch.BatchError, match="already running"):
+            manager.start(**options)
+    finally:
+        release.set()
+        for worker in workers:
+            worker.join(3.0)
+            assert not worker.is_alive()
+
+    assert not manager.is_active()
+    restored = batch.BatchManager(ProviderExporter(), service, tmp_path / "config", _log()).latest()
+    assert restored["status"] == "blocked"
+    assert restored["state"] == state
+    assert [item["status"] for item in restored["items"]] == ["done", "blocked", "queued"]
+
+
 def test_batch_cancel_during_wait_preserves_completed_output(tmp_path):
     service = ControlledService(wait_on=2)
     manager, options, output = _batch_case(tmp_path, service)
