@@ -3,3 +3,5 @@ pytest-cov>=6
 ruff>=0.12
 PyYAML>=6
 fastapi>=0.110,<1
+# Starlette's TestClient requires an HTTP client for the reuse route tests.
+httpx2>=2.0,<3
