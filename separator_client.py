@@ -9,22 +9,29 @@ current MinusMix support contract.
 """
 from __future__ import annotations
 
+import hashlib
 import json
+import math
 import mimetypes
+import os
 import re
 import shutil
+import subprocess
 import tempfile
 import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from email.utils import parsedate_to_datetime
 from pathlib import Path
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import quote, urljoin, urlsplit
 
 SUPPORTED_STEMS = ("guitar", "bass", "drums", "vocals", "piano", "other")
 DEFAULT_MODEL = "bs_roformer_sw"
 DEFAULT_PORT = 7865
 JOB_TIMEOUT_SECONDS = 35 * 60
+RECOVERY_TIMEOUT_SECONDS = 35 * 60
+TOTAL_TIMEOUT_SECONDS = 70 * 60
 BUSY_RETRIES = 6
 BUSY_BASE_BACKOFF = 5
 BUSY_MAX_BACKOFF = 60
@@ -44,6 +51,28 @@ CancelCallback = Callable[[], None] | None
 
 class SeparationUnavailable(RuntimeError):
     """The managed local server cannot currently perform a temporary split."""
+    blocks_batch = False
+    state = "failed"
+
+
+class SeparationServiceBlocked(SeparationUnavailable):
+    """The shared service needs attention; retain the remaining batch queue."""
+    blocks_batch = True
+
+    def __init__(self, message: str, state: str = "incompatible"):
+        super().__init__(message)
+        self.state = state
+
+
+class _TransientRequest(SeparationUnavailable):
+    def __init__(self, message: str, *, retry_after: float = 0, ambiguous: bool = False):
+        super().__init__(message)
+        self.retry_after = retry_after
+        self.ambiguous = ambiguous
+
+
+class _LostResult(SeparationUnavailable):
+    pass
 
 
 class IncompleteSeparationError(SeparationUnavailable):
@@ -216,7 +245,7 @@ def _interruptible_wait(seconds: float, cancel_cb: CancelCallback) -> None:
 def _valid_job_id(value: object) -> str | None:
     if not isinstance(value, str):
         return None
-    return value if re.fullmatch(r"[A-Za-z0-9._-]{1,160}", value) else None
+    return value if 0 < len(value) <= 512 and value not in (".", "..") and not any(ord(c) < 32 for c in value) else None
 
 
 def _available_supported_stems(stem_urls: dict) -> tuple[str, ...]:
@@ -240,19 +269,121 @@ def _temp_volume_free_bytes(work_dir: Path) -> int | None:
             return None
 
 
+def _validate_audio(path: Path, cancel_cb: CancelCallback = None) -> bool:
+    """Decode with the host's existing FFmpeg; no ML/runtime dependency imports."""
+    from audio import _ffmpeg_cmd
+    ffmpeg = _ffmpeg_cmd()
+    if not ffmpeg:
+        raise SeparationServiceBlocked("FFmpeg is unavailable; repair the game installation")
+    flags = {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)} if os.name == "nt" else {}
+    with tempfile.TemporaryFile() as output:
+        proc = subprocess.Popen(
+            [ffmpeg, "-v", "error", "-xerror", "-nostdin", "-i", str(path),
+             "-map", "0:a:0", "-progress", "pipe:1", "-f", "null", "-"],
+            stdout=output, stderr=output, **flags,
+        )
+        try:
+            deadline = time.monotonic() + 120
+            while proc.poll() is None:
+                if cancel_cb:
+                    cancel_cb()
+                if time.monotonic() >= deadline:
+                    raise SeparationUnavailable("Downloaded audio validation timed out")
+                time.sleep(.1)
+            output.seek(0)
+            detail = output.read().decode("utf-8", errors="replace")
+            samples = re.findall(r"out_time_us=(\d+)", detail)
+            return proc.returncode == 0 and any(int(value) > 0 for value in samples)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+            proc.wait()
+
+
+def _input_identity(path: Path, cancel_cb: CancelCallback = None) -> tuple:
+    stat = path.stat()
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        while True:
+            if cancel_cb:
+                cancel_cb()
+            chunk = source.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, digest.digest()
+
+
+class _Operation:
+    """Budgets and pinned request data live for the whole separation, not a retry."""
+    def __init__(self, target, requested, cancel_cb=None, state_cb=None):
+        self.target = target
+        self.requested = tuple(requested)
+        self.cancel_cb = cancel_cb
+        self.state_cb = state_cb
+        self.started = time.monotonic()
+        self.recovery_used = 0.0
+        self.wait_since = None
+        self.recomputations = 0
+        self.model_engine = None
+        self.model_revision = None
+        self.input_identity = None
+        self.configuration = None
+        self.last_state = None
+
+    def check(self):
+        if self.cancel_cb:
+            self.cancel_cb()
+        now = time.monotonic()
+        waiting = now - self.wait_since if self.wait_since is not None else 0
+        recovery = self.recovery_used + waiting
+        if now - self.started >= TOTAL_TIMEOUT_SECONDS or recovery >= RECOVERY_TIMEOUT_SECONDS:
+            raise SeparationServiceBlocked(
+                "Stem Splitter did not recover within the shared recovery time limit; "
+                "check its installation and retry the waiting items", "recovery_exhausted")
+        if now - self.started - recovery >= JOB_TIMEOUT_SECONDS:
+            raise SeparationUnavailable(
+                f"split server job timed out after {JOB_TIMEOUT_SECONDS // 60} minutes")
+
+    def state(self, state, detail):
+        self.check()
+        event = {"state": state, "detail": detail}
+        if self.state_cb and event != self.last_state:
+            self.state_cb(event)
+        self.last_state = event
+
+    def waiting(self, detail, since=None):
+        if self.wait_since is None:
+            self.wait_since = time.monotonic() if since is None else since
+        self.state("waiting_for_server", detail)
+
+    def resume(self, state, detail):
+        self.check()
+        if self.wait_since is not None:
+            self.recovery_used += time.monotonic() - self.wait_since
+            self.wait_since = None
+        self.state(state, detail)
+
+    def recompute(self, detail):
+        self.check()
+        if self.recomputations >= INCOMPLETE_ATTEMPTS - 1:
+            raise SeparationServiceBlocked(
+                "The server lost the separation result again; the one recovery restart "
+                "has already been used. Check Stem Splitter before retrying", "recovery_exhausted")
+        self.recomputations += 1
+        self.waiting(detail)
+
+
 class SeparationClient:
-    """Discover and use the server managed by released Stem Splitter builds."""
+    """Public local HTTP client with request-scoped update/restart recovery."""
+    supports_state_callback = True
 
     def __init__(self, config_dir: Path, log, requests_module=None):
         self.config_dir = Path(config_dir)
         self.log = log
         self._requests_module = requests_module
         self._resolve_lock = threading.Lock()
-        self._resolve_cache: tuple[
-            float,
-            tuple[ServerTarget, ...],
-            tuple[ServerTarget | None, dict | None, str],
-        ] | None = None
+        self._resolve_cache = None
 
     def _requests(self):
         if self._requests_module is not None:
@@ -260,40 +391,34 @@ class SeparationClient:
         import requests
         return requests
 
-    def _targets(self) -> list[ServerTarget]:
+    def _configuration(self):
         splitter = _read_json(self.config_dir / "stem_splitter.json")
         state = _read_json(self.config_dir / "stem_splitter_server.json")
+        configured = _port(splitter.get("local_server_port"), 0)
+        recorded = _port(state.get("port"), 0)
         model = str(splitter.get("remote_model") or DEFAULT_MODEL).strip() or DEFAULT_MODEL
+        return configured, recorded, model
 
-        urls: list[tuple[str, str, str | None]] = []
-        state_port = _port(state.get("port"), 0)
-        if state_port:
-            urls.append((f"http://127.0.0.1:{state_port}", "managed-local", None))
-        configured_port = _port(splitter.get("local_server_port"), DEFAULT_PORT)
-        urls.append((f"http://127.0.0.1:{configured_port}", "managed-local", None))
-        if configured_port != DEFAULT_PORT:
-            urls.append((f"http://127.0.0.1:{DEFAULT_PORT}", "managed-local", None))
+    def _targets(self) -> list[ServerTarget]:
+        configured, recorded, model = self._configuration()
+        port = recorded or configured or DEFAULT_PORT
+        return [ServerTarget(f"http://127.0.0.1:{port}", model, None, "managed-local")]
 
-        targets: list[ServerTarget] = []
-        seen: set[str] = set()
-        for raw_url, kind, key in urls:
-            url = _server_url(raw_url)
-            if not url or url.casefold() in seen:
-                continue
-            seen.add(url.casefold())
-            targets.append(ServerTarget(url=url, model=model, api_key=key, kind=kind))
-        return targets
+    def _invalidate_resolution(self):
+        with self._resolve_lock:
+            self._resolve_cache = None
 
     def _probe(self, target: ServerTarget, timeout: float = 2.0) -> dict | None:
         response = None
         try:
             response = self._requests().get(
-                f"{target.url}/health", timeout=timeout, allow_redirects=False,
-            )
+                f"{target.url}/health", timeout=timeout, allow_redirects=False)
             if response.status_code != 200:
-                return None
+                return {"_http_status": response.status_code, "_detail": _error_body(response)}
             value = response.json()
-            return value if isinstance(value, dict) else None
+            return value if isinstance(value, dict) else {"_http_status": 200, "_invalid": True}
+        except (ValueError, TypeError):
+            return {"_http_status": 200, "_invalid": True}
         except Exception:
             return None
         finally:
@@ -306,479 +431,496 @@ class SeparationClient:
         if not isinstance(warmup, dict):
             return None
         value = warmup.get(model)
+        if value is None and health.get("demucs_model") == model:
+            value = warmup.get("demucs")
         return str(value).strip().lower() if value is not None else None
 
     @staticmethod
-    def _ready_reason(target: ServerTarget, health: dict) -> tuple[bool, str]:
-        if str(health.get("status") or "ok").lower() not in ("ok", "ready", "healthy"):
-            return False, "Stem Splitter's managed local server reported that it is not ready"
-        model_state = SeparationClient._model_state(health, target.model)
-        if model_state and model_state not in ("ready", "loaded", "complete", "completed"):
-            friendly = model_state.replace("_", " ")
-            return False, (
-                f"{target.model} model is {friendly}; open Stem Splitter and finish downloading models"
-            )
-        device = str(health.get("device") or "").strip().upper()
-        gpu = bool(health.get("gpu"))
-        accelerator = f" · {device}{' GPU' if gpu and 'GPU' not in device else ''}" if device else ""
-        return True, f"managed local server ready{accelerator}"
+    def _verified_inventory(runtime, target, requested):
+        incompatible = {"state": "incompatible", "reason": "The local server's verified model metadata is malformed"}
+        if type(runtime.get("managed")) is not bool:
+            return incompatible
+        if not runtime["managed"]:
+            return {}
+        models = runtime.get("models")
+        if not isinstance(models, dict):
+            return incompatible
+        model = models.get(target.model)
+        if model is None or (isinstance(model, dict) and model.get("verified") is not True):
+            return {"state": "missing_model", "reason": f"{target.model} is not installed and verified; "
+                    "open Stem Splitter and install the selected model"}
+        if not isinstance(model, dict):
+            return incompatible
+        stems = model.get("stems")
+        if not isinstance(stems, list) or not all(isinstance(stem, str) for stem in stems):
+            return incompatible
+        if any(key in model and not isinstance(model[key], str) for key in ("engine", "revision")):
+            return incompatible
+        result = {"supported_stems": [stem for stem in SUPPORTED_STEMS if stem in stems],
+                  "inventory_verified": True, "model_engine": model.get("engine"),
+                  "model_revision": model.get("revision")}
+        missing = set(requested) - set(stems)
+        if missing:
+            result.update(state="unsupported_stems", reason="The selected model does not provide: " + ", ".join(sorted(missing)))
+        return result
 
-    def _resolve(
-        self, targets: list[ServerTarget] | None = None,
-    ) -> tuple[ServerTarget | None, dict | None, str]:
-        targets = self._targets() if targets is None else targets
-        target_key = tuple(targets)
-        with self._resolve_lock:
-            now = time.monotonic()
-            if self._resolve_cache is not None:
-                expires_at, cached_key, cached_result = self._resolve_cache
-                if cached_key == target_key and now < expires_at:
-                    return cached_result
-
-            first_unready: tuple[dict, str] | None = None
-            result: tuple[ServerTarget | None, dict | None, str] | None = None
-            for target in targets:
-                health = self._probe(target)
-                if health is None:
-                    continue
-                ready, reason = self._ready_reason(target, health)
-                if ready:
-                    result = (target, health, reason)
-                    break
-                if first_unready is None:
-                    first_unready = (health, reason)
-            if result is None and first_unready is not None:
-                health, reason = first_unready
-                result = (None, health, reason)
-            if result is None:
-                result = (None, None, (
-                    "Stem Splitter's managed local server is not running; "
-                    "open Stem Splitter and start it"
-                ))
-
-            ttl = (
-                READY_RESOLUTION_CACHE_SECONDS
-                if result[0] is not None
-                else UNREADY_RESOLUTION_CACHE_SECONDS
-            )
-            self._resolve_cache = (time.monotonic() + ttl, target_key, result)
+    @staticmethod
+    def _assessment(target, health, requested=(), *, retrieval=False):
+        result = {"ready": False, "state": "incompatible", "waitable": False,
+                  "reason": "The local server has an incompatible health response; check Stem Splitter",
+                  "supported_stems": list(SUPPORTED_STEMS), "inventory_verified": False}
+        def outcome(state, reason, *, ready=False, waitable=False):
+            return {**result, "state": state, "reason": reason, "ready": ready, "waitable": waitable}
+        if health is None:
+            return outcome("reconnecting", "Stem Splitter's managed local server is not running; "
+                           "open Stem Splitter and start it", waitable=True)
+        code = health.get("_http_status")
+        if code in (429, 502, 503, 504):
+            return outcome("updating", "The local server is busy or restarting", waitable=True)
+        if code or health.get("_invalid"):
+            return outcome("incompatible", f"Local server health returned HTTP {code}: "
+                           f"{health.get('_detail') or 'invalid response'}")
+        if str(health.get("status", "")).lower() not in ("ok", "ready", "healthy"):
             return result
+        runtime = health.get("runtime")
+        if runtime is not None and not isinstance(runtime, dict):
+            return result
+        if runtime is not None and type(runtime.get("schema_version")) is not int:
+            return result
+        recognized = isinstance(runtime, dict) and runtime.get("schema_version") == 1
+        updating = False
+        if recognized:
+            caps = runtime.get("capabilities", [])
+            activity = runtime.get("activity", {})
+            if (not isinstance(caps, list) or not all(isinstance(cap, str) for cap in caps)
+                    or not isinstance(activity, dict)
+                    or any(key in activity and type(activity[key]) is not bool for key in ("draining", "sealed"))):
+                return result
+            if activity.get("draining") or activity.get("sealed"):
+                updating = True
+        if retrieval:
+            if updating:
+                return outcome("updating", "Stem Splitter is updating; waiting for its local server", waitable=True)
+            return outcome("ready", "The original server is available for result retrieval", ready=True)
+        model_state = SeparationClient._model_state(health, target.model)
+        if model_state and (model_state.startswith("failed") or model_state in ("error", "unavailable")):
+            return outcome("missing_model", f"{target.model} model failed to load; check Stem Splitter: {model_state}")
+        if recognized and "verified_models_v1" in runtime.get("capabilities", []):
+            inventory = SeparationClient._verified_inventory(runtime, target, requested)
+            result.update(inventory)
+            if "state" in inventory:
+                return result
+        if updating:
+            return outcome("updating", "Stem Splitter is updating; waiting for its local server", waitable=True)
+        if model_state in ("pending", "loading", "downloading", "warming", "initializing", "queued"):
+            return outcome("warming", f"{target.model} model is {model_state}; waiting for Stem Splitter "
+                           "to finish downloading models or loading them", waitable=True)
+        if model_state not in (None, "skipped", "ready", "loaded", "complete", "completed"):
+            return outcome("incompatible", f"Unrecognized model readiness state: {model_state}")
+        if result["inventory_verified"] or model_state in ("ready", "loaded", "complete", "completed"):
+            return outcome("ready", "managed local server ready", ready=True)
+        return outcome("on_demand", "Local server available for an on-demand separation; model files "
+                       "are not verified by this older server", ready=True)
+
+    @staticmethod
+    def _ready_reason(target, health):
+        assessed = SeparationClient._assessment(target, health)
+        return assessed["ready"], assessed["reason"]
+
+    def _resolve(self, targets=None):
+        targets = self._targets() if targets is None else targets
+        key = tuple(targets)
+        with self._resolve_lock:
+            if self._resolve_cache and self._resolve_cache[1] == key and time.monotonic() < self._resolve_cache[0]:
+                return self._resolve_cache[2]
+        target = targets[0]
+        health = self._probe(target)
+        assessed = self._assessment(target, health)
+        result = (target if assessed["ready"] else None, health, assessed["reason"])
+        ttl = READY_RESOLUTION_CACHE_SECONDS if assessed["ready"] else UNREADY_RESOLUTION_CACHE_SECONDS
+        with self._resolve_lock:
+            self._resolve_cache = (time.monotonic() + ttl, key, result)
+        return result
 
     def status(self) -> dict:
         targets = self._targets()
-        target, health, reason = self._resolve(targets)
-        return {
-            "available": bool(targets),
-            "ready": target is not None,
-            "engine": "server" if target else None,
-            "reason": reason,
-            "source": target.kind if target else None,
-            "model": target.model if target else None,
-            "device": health.get("device") if isinstance(health, dict) else None,
-            "gpu": bool(health.get("gpu")) if isinstance(health, dict) else False,
-            "supported_stems": list(SUPPORTED_STEMS),
-        }
+        _ready_target, health, _reason = self._resolve(targets)
+        target = targets[0]
+        assessed = self._assessment(target, health)
+        configured, recorded, _model = self._configuration()
+        if health is None and configured and recorded and configured != recorded:
+            assessed.update(state="endpoint_changed", waitable=False,
+                            reason=f"Recorded server port {recorded} differs from configured port {configured}; "
+                            "start the intended server in Stem Splitter before retrying")
+        if not (configured or recorded) and (health is None or health.get("_http_status")):
+            assessed.update(state="unavailable", waitable=False)
+            assessed["reason"] = "Stem Splitter's managed local server is not running; open Stem Splitter and install/start it"
+        if configured and recorded and configured != recorded and assessed["ready"]:
+            assessed["reason"] += f" on recorded port {recorded}; configured port is {configured}"
+        return {"available": bool(configured or recorded or health), **assessed,
+                "engine": "server" if assessed["ready"] else None,
+                "source": target.kind if assessed["ready"] else None, "model": target.model,
+                "device": health.get("device") if health else None,
+                "gpu": bool(health.get("gpu")) if health else False}
 
-    def _get_authed(self, url: str, target: ServerTarget, *, timeout: float,
-                    stream: bool = False):
-        headers = {"X-API-Key": target.api_key} if target.api_key else None
-        requests = self._requests()
-        for _ in range(MAX_REDIRECTS + 1):
-            hop_headers = headers if _same_origin(url, target.url) else None
-            if headers and hop_headers is None:
-                self.log.warning(
-                    "minus_mix: downloading %s without the server API key "
-                    "because it is off-origin from the managed local server",
-                    _redact_url(url),
-                )
+    def _assert_pinned(self, ctx):
+        configured = self._configuration()[0]
+        if (self._targets()[0].url != ctx.target.url
+                or (ctx.configuration is not None and configured != ctx.configuration)):
+            raise SeparationServiceBlocked(
+                "The configured local server endpoint changed during this export; "
+                "finish server setup and retry this item", "endpoint_changed")
+
+    def _recover(self, ctx, detail, *, retry_after=0, retrieval=False):
+        ctx.waiting(detail)
+        self._invalidate_resolution()
+        delay = max(0.0, min(BUSY_MAX_BACKOFF, retry_after))
+        while True:
+            ctx.check()
+            self._assert_pinned(ctx)
+            if delay:
+                _interruptible_wait(delay, ctx.check)
+            assessed = self._assessment(ctx.target, self._probe(ctx.target), ctx.requested, retrieval=retrieval)
+            ctx.check()
+            if assessed["ready"]:
+                if not retrieval:
+                    engine = assessed.get("model_engine")
+                    if ctx.model_engine and engine and ctx.model_engine != engine:
+                        raise SeparationServiceBlocked("The selected model's engine contract changed; "
+                                                       "review it in Stem Splitter before retrying")
+                return assessed
+            if not assessed["waitable"]:
+                raise SeparationServiceBlocked(assessed["reason"], assessed["state"])
+            ctx.waiting(assessed["reason"])
+            delay = min(BUSY_MAX_BACKOFF, max(BUSY_BASE_BACKOFF, delay * 2))
+
+    @staticmethod
+    def _retry_after(response):
+        raw = response.headers.get("Retry-After", response.headers.get("retry-after", 0))
+        try:
+            value = float(raw)
+        except (ValueError, TypeError):
             try:
-                response = requests.get(
-                    url, headers=hop_headers, timeout=timeout,
-                    allow_redirects=False, stream=stream,
-                )
+                value = parsedate_to_datetime(str(raw)).timestamp() - time.time()
+            except (ValueError, TypeError, OverflowError):
+                return 0
+        return min(BUSY_MAX_BACKOFF, max(0.0, value)) if math.isfinite(value) else 0
+
+    def _get_authed(self, url, target, *, timeout, stream=False):
+        headers = {"X-API-Key": target.api_key} if target.api_key else None
+        for _ in range(MAX_REDIRECTS + 1):
+            if not _same_origin(url, target.url):
+                raise SeparationServiceBlocked("The local server redirected its result to another origin; "
+                                               "the export was stopped")
+            url = urljoin(target.url + "/", url)
+            try:
+                response = self._requests().get(url, headers=headers, timeout=timeout,
+                                               allow_redirects=False, stream=stream)
             except Exception as exc:
-                raise SeparationUnavailable(
-                    "connection to Stem Splitter's managed local server was lost; "
-                    "restart it and retry"
-                ) from exc
-            location = response.headers.get("location") if response.status_code in REDIRECT_CODES else None
+                raise _TransientRequest("Connection to the local stem server was interrupted") from exc
+            location = (response.headers.get("location") or response.headers.get("Location")) if response.status_code in REDIRECT_CODES else None
             if not location:
                 return response, url
             response.close()
             url = urljoin(url, location)
-        raise RuntimeError(f"split server sent more than {MAX_REDIRECTS} redirects")
+        raise SeparationServiceBlocked(f"split server sent more than {MAX_REDIRECTS} redirects")
 
-    def _cleanup(self, target: ServerTarget, job_id: str) -> None:
-        if _valid_job_id(job_id) is None:
-            return
-        headers = {"X-API-Key": target.api_key} if target.api_key else None
-        requests = self._requests()
-        # Current managed servers expose /cache; the simpler FeedForge-compatible
-        # server uses DELETE /jobs. Supporting both keeps the plugin installable
-        # across current main/nightly variants without importing either project.
-        for endpoint in (f"/cache/{job_id}", f"/jobs/{job_id}"):
-            response = None
-            try:
-                response = requests.delete(
-                    f"{target.url}{endpoint}", headers=headers, timeout=30,
-                    allow_redirects=False,
-                )
-                if response.status_code in (200, 202, 204):
-                    return
-                if response.status_code not in (404, 405):
-                    self.log.warning(
-                        "minus_mix: temporary server-cache cleanup returned HTTP %s",
-                        response.status_code,
-                    )
-                    return
-            except Exception as exc:
-                self.log.warning(
-                    "minus_mix: temporary server-cache cleanup failed: %s", exc,
-                )
-                return
-            finally:
-                if response is not None:
-                    response.close()
+    def _cleanup(self, target, job_id):
+        # Results are content-addressed and may serve other clients. A returned
+        # ID is not a deletion lease; let the server enforce its cache retention.
+        return None
 
-    def _submit(self, target: ServerTarget, mix: Path, requested: list[str],
-                progress_cb: ProgressCallback, cancel_cb: CancelCallback) -> dict:
-        content_type = mimetypes.guess_type(mix.name)[0] or {
-            ".ogg": "audio/ogg", ".opus": "audio/opus", ".wav": "audio/wav",
-            ".flac": "audio/flac", ".mp3": "audio/mpeg", ".m4a": "audio/mp4",
-        }.get(mix.suffix.lower(), "application/octet-stream")
+    def _submit(self, target, mix, requested, progress_cb, cancel_cb, ctx=None):
+        ctx = ctx or _Operation(target, requested, cancel_cb)
+        content_type = mimetypes.guess_type(mix.name)[0] or "application/octet-stream"
         headers = {"X-API-Key": target.api_key} if target.api_key else None
-        params = {"model": target.model, "stems": ",".join(requested)}
-        requests = self._requests()
-        response = None
-        for attempt in range(BUSY_RETRIES):
-            if cancel_cb:
-                cancel_cb()
+        while True:
+            ctx.check()
+            self._assert_pinned(ctx)
+            identity = _input_identity(mix, ctx.check)
+            if ctx.input_identity is not None and identity != ctx.input_identity:
+                raise SeparationUnavailable("The temporary input changed during separation; start a new export")
+            ctx.input_identity = identity
+            ctx.resume("separating", "Uploading the original mix to the local stem server")
             if progress_cb:
-                progress_cb(
-                    0.08,
-                    "Uploading the full mix to Stem Splitter's managed local server",
-                )
+                progress_cb(.08, "Uploading the full mix to Stem Splitter's managed local server")
+            started = time.monotonic()
             try:
                 with mix.open("rb") as handle:
-                    response = requests.post(
-                        f"{target.url}/separate",
-                        files={"file": (mix.name, handle, content_type)},
-                        params=params, headers=headers, timeout=(15, 600),
-                        allow_redirects=False,
-                    )
-            except Exception as exc:
-                raise SeparationUnavailable(
-                    "could not reach Stem Splitter's managed local server; "
-                    "start or restart it and retry"
-                ) from exc
-            if response.status_code != 503 or attempt == BUSY_RETRIES - 1:
-                break
-            response.close()
-            wait = min(BUSY_MAX_BACKOFF, BUSY_BASE_BACKOFF * (2 ** attempt))
-            if progress_cb:
-                progress_cb(
-                    0.10,
-                    f"Stem Splitter's managed local server is busy; "
-                    f"retrying in {wait} seconds",
-                )
-            _interruptible_wait(wait, cancel_cb)
-
-        if response is None or response.status_code != 200:
-            code = response.status_code if response is not None else "no response"
-            body = _error_body(response) if response is not None else ""
-            if response is not None:
-                response.close()
-            raise SeparationUnavailable(f"split server error ({code}): {body}")
-        try:
-            try:
-                payload = response.json()
-            except ValueError as exc:
-                raise SeparationUnavailable(
-                    f"split server returned a non-JSON response: {_error_body(response)}"
-                ) from exc
-        finally:
-            response.close()
-        if not isinstance(payload, dict):
-            raise SeparationUnavailable("split server returned an invalid response")
-        return payload
-
-    def _poll_job(self, target: ServerTarget, payload: dict,
-                  progress_cb: ProgressCallback, cancel_cb: CancelCallback
-                  ) -> tuple[str | None, dict, list[str], bool]:
-        job_id = _valid_job_id(payload.get("job_id"))
-        stem_urls = payload.get("stems") if isinstance(payload.get("stems"), dict) else {}
-        reported_missing = [
-            str(stem).strip().lower() for stem in (payload.get("missing") or [])
-            if isinstance(stem, str) and stem.strip()
-        ]
-        state = str(payload.get("status") or "").lower()
-        completed = bool(stem_urls) or state in ("complete", "completed", "done")
-        if state in ("failed", "error", "canceled", "cancelled"):
-            raise _TerminalJobError(
-                f"split server job failed: {payload.get('error') or state}"
-            )
-        if completed or job_id is None:
-            return job_id, stem_urls, reported_missing, completed
-
-        deadline = time.monotonic() + JOB_TIMEOUT_SECONDS
-        while time.monotonic() < deadline:
-            _interruptible_wait(2.0, cancel_cb)
-            response, _ = self._get_authed(
-                f"{target.url}/jobs/{job_id}", target, timeout=30,
-            )
-            try:
-                if response.status_code != 200:
-                    raise SeparationUnavailable(
-                        f"split server job poll failed ({response.status_code}): "
-                        f"{_error_body(response)}"
-                    )
-                try:
-                    job = response.json()
-                except ValueError as exc:
-                    raise SeparationUnavailable(
-                        f"split server returned a non-JSON job response: {_error_body(response)}"
-                    ) from exc
-            finally:
-                response.close()
-            if not isinstance(job, dict):
-                raise SeparationUnavailable("split server returned an invalid job response")
-            state = str(job.get("status") or "").lower()
-            if state in ("complete", "completed", "done"):
-                stem_urls = job.get("stems") if isinstance(job.get("stems"), dict) else {}
-                reported_missing = [
-                    str(stem).strip().lower() for stem in (job.get("missing") or [])
-                    if isinstance(stem, str) and stem.strip()
-                ]
-                return job_id, stem_urls, reported_missing, True
-            if state in ("failed", "error", "canceled", "cancelled"):
-                raise _TerminalJobError(
-                    f"split server job failed: {job.get('error') or state}"
-                )
-            raw_progress = job.get("progress")
-            try:
-                fraction = float(raw_progress)
-                if fraction > 1:
-                    fraction /= 100.0
-            except (TypeError, ValueError):
-                fraction = 0.35
-            fraction = max(0.0, min(1.0, fraction))
-            if progress_cb:
-                progress_cb(
-                    0.12 + fraction * 0.58,
-                    f"Separating on server ({int(fraction * 100)}%)",
-                )
-        raise SeparationUnavailable(
-            f"split server job timed out after {JOB_TIMEOUT_SECONDS // 60} minutes"
-        )
-
-    def _download_stems(self, target: ServerTarget, stem_urls: dict,
-                        requested: list[str], out_dir: Path,
-                        progress_cb: ProgressCallback,
-                        cancel_cb: CancelCallback) -> dict[str, Path]:
-        download_items = list(stem_urls.items())
-        normalized = {name: _normalize_stem_id(str(name)) for name, _url in download_items}
-        requested_set = set(requested)
-        if requested_set.issubset({stem for stem in normalized.values() if stem}):
-            download_items = [
-                (name, url) for name, url in download_items
-                if normalized.get(name) in requested_set
-            ]
-
-        result_dir = out_dir / "server_stems"
-        result_dir.mkdir(parents=True, exist_ok=True)
-        produced: dict[str, Path] = {}
-        total = max(1, len(download_items))
-        for index, (name, raw_url) in enumerate(download_items):
-            if cancel_cb:
-                cancel_cb()
-            if not isinstance(raw_url, str) or not raw_url:
-                continue
-            url = f"{target.url}{raw_url}" if raw_url.startswith("/") else raw_url
-            if progress_cb:
-                progress_cb(0.72 + 0.22 * (index / total), f"Downloading {name}")
-            response, final_url = self._get_authed(url, target, timeout=180, stream=True)
-            destination = None
-            try:
-                if response.status_code != 200:
-                    raise SeparationUnavailable(
-                        f"stem download failed for '{name}': HTTP {response.status_code} "
-                        f"from {_redact_url(final_url)}"
-                    )
-                clean_url = str(final_url).split("?", 1)[0].split("#", 1)[0]
-                suffix = Path(clean_url).suffix.lower()
-                extension = suffix if suffix in AUDIO_EXTENSIONS else ".wav"
-                stem_id = _normalize_stem_id(str(name)) or _sanitize(str(name))
-                destination = result_dir / f"{stem_id}{extension}"
-                downloaded_bytes = 0
-                with destination.open("wb") as output:
-                    for chunk in response.iter_content(chunk_size=1024 * 1024):
-                        if cancel_cb:
-                            cancel_cb()
-                        if chunk:
-                            downloaded_bytes += output.write(chunk)
-                if downloaded_bytes == 0:
-                    destination.unlink()
-                    destination = None
-                    continue
-                produced.setdefault(stem_id, destination)
+                    response = self._requests().post(
+                        f"{target.url}/separate", files={"file": (mix.name, handle, content_type)},
+                        params={"model": target.model, "stems": ",".join(requested)},
+                        headers=headers, timeout=(5, 60), allow_redirects=False)
             except Exception:
-                if destination is not None:
+                ctx.recompute("Upload response was lost; waiting before the one permitted resubmission "
+                              "of this input. The server may already have started its first attempt")
+                ctx.wait_since = started
+                self._recover(ctx, "Waiting for the same server after the lost upload response")
+                continue
+            try:
+                if response.status_code in (429, 503):
+                    delay = self._retry_after(response) or BUSY_BASE_BACKOFF
+                    detail = f"Stem Splitter's managed local server is busy ({response.status_code}); waiting to retry"
+                    response.close()
+                    self._recover(ctx, detail, retry_after=delay)
+                    continue
+                if response.status_code in (502, 504):
+                    ctx.recompute("The upload response was ambiguous; waiting before the one permitted resubmission")
+                    ctx.wait_since = started
+                    response.close()
+                    self._recover(ctx, "Waiting for the same server after an ambiguous upload response")
+                    continue
+                if response.status_code != 200:
+                    error = f"split server error ({response.status_code}): {_error_body(response)}"
                     try:
-                        destination.unlink()
-                    except OSError:
-                        pass
-                raise
+                        rejected = response.json()
+                    except ValueError:
+                        rejected = None
+                    if isinstance(rejected, dict) and rejected.get("code") in ("model_not_installed", "unsupported_stems"):
+                        state = "missing_model" if rejected["code"] == "model_not_installed" else "unsupported_stems"
+                        raise SeparationServiceBlocked(error or rejected.get("error"), state)
+                    if response.status_code in (401, 403, 404, 405) or (
+                            response.status_code in (400, 422) and "model" in error.lower()):
+                        raise SeparationServiceBlocked(error)
+                    raise SeparationUnavailable(error)
+                try:
+                    payload = response.json()
+                except ValueError as exc:
+                    raise SeparationServiceBlocked(f"split server returned a non-JSON response: {_error_body(response)}") from exc
+                if not isinstance(payload, dict):
+                    raise SeparationServiceBlocked("split server returned an invalid response")
+                ctx.check()
+                return payload
             finally:
                 response.close()
+
+    def _get_recovering(self, ctx, url, *, stream=False, label="job"):
+        missing_confirmed = False
+        while True:
+            ctx.check()
+            self._assert_pinned(ctx)
+            started = time.monotonic()
+            try:
+                response, final_url = self._get_authed(url, ctx.target, timeout=(3, 15), stream=stream)
+            except _TransientRequest:
+                ctx.waiting(f"Waiting for the original server to resume {label}", since=started)
+                self._recover(ctx, f"Reconnecting to retrieve the original {label}", retry_after=BUSY_BASE_BACKOFF, retrieval=True)
+                continue
+            if response.status_code in (429, 502, 503, 504):
+                delay = self._retry_after(response) or BUSY_BASE_BACKOFF
+                response.close()
+                self._recover(ctx, f"Server update interrupted {label}; waiting to resume", retry_after=delay, retrieval=True)
+                continue
+            if response.status_code in (404, 410):
+                response.close()
+                self._recover(ctx, f"Checking whether the original {label} survived the restart", retrieval=True)
+                if missing_confirmed:
+                    raise _LostResult(f"The original {label} is no longer available on the healthy server")
+                missing_confirmed = True
+                continue
+            if response.status_code != 200:
+                detail = _error_body(response)
+                code = response.status_code
+                response.close()
+                error = f"stem download failed for {label}: HTTP {code}" if stream else f"split server job poll failed ({code}): {detail}"
+                if code in (401, 403, 405, 410, 422):
+                    raise SeparationServiceBlocked(error)
+                raise SeparationUnavailable(error)
+            try:
+                ctx.resume("downloading" if stream else "separating", f"Resuming the original {label}")
+            except BaseException:
+                response.close()
+                raise
+            return response, final_url
+
+    @staticmethod
+    def _job_result(payload):
+        if not isinstance(payload, dict):
+            raise SeparationServiceBlocked("split server returned an invalid job response")
+        state = str(payload.get("status") or "").lower()
+        if state in ("failed", "error", "canceled", "cancelled"):
+            raise _TerminalJobError(f"split server job failed: {payload.get('error') or state}")
+        stems = payload.get("stems") if isinstance(payload.get("stems"), dict) else {}
+        completed = bool(stems) or state in ("complete", "completed", "done")
+        if not completed and state not in ("", "pending", "queued", "running", "processing", "separating", "waiting"):
+            raise SeparationServiceBlocked(f"split server returned an unsupported job state: {state}")
+        missing = payload.get("missing") or []
+        return stems, [stem for stem in missing if isinstance(stem, str)] if isinstance(missing, list) else [], completed
+
+    def _poll_job(self, target, payload, progress_cb, cancel_cb, ctx=None):
+        ctx = ctx or _Operation(target, (), cancel_cb)
+        job_id = _valid_job_id(payload.get("job_id"))
+        while True:
+            stems, missing, complete = self._job_result(payload)
+            if complete:
+                return job_id, stems, missing, True
+            if job_id is None:
+                raise SeparationServiceBlocked("split server returned neither a result nor a valid job ID")
+            ctx.check()
+            _interruptible_wait(2, ctx.check)
+            response, _url = self._get_recovering(ctx, f"{target.url}/jobs/{quote(job_id, safe='')}")
+            try:
+                try:
+                    payload = response.json()
+                except ValueError as exc:
+                    raise SeparationServiceBlocked(f"split server returned a non-JSON job response: {_error_body(response)}") from exc
+            finally:
+                response.close()
+            if not isinstance(payload, dict):
+                raise SeparationServiceBlocked("split server returned an invalid job response")
+            if payload.get("job_id") is not None and payload["job_id"] != job_id:
+                raise SeparationServiceBlocked("The server returned a different job while recovering the original result")
+            try:
+                value = float(payload.get("progress", .35))
+                value = value / 100 if value > 1 else value
+                fraction = min(1., max(0., value)) if math.isfinite(value) else .35
+            except (ValueError, TypeError):
+                fraction = .35
+            if progress_cb:
+                progress_cb(.12 + fraction * .58, f"Separating on server ({int(fraction * 100)}%)")
+
+    def _download_file(self, ctx, url, destination, label):
+        partial = destination.with_name(destination.name + ".part")
+        try:
+            while True:
+                response, _url = self._get_recovering(ctx, url, stream=True, label=repr(label))
+                started = time.monotonic()
+                interrupted = False
+                try:
+                    with partial.open("wb") as output:
+                        try:
+                            chunks = iter(response.iter_content(chunk_size=1024 * 1024))
+                            while True:
+                                ctx.check()
+                                try:
+                                    chunk = next(chunks)
+                                except StopIteration:
+                                    break
+                                except Exception:
+                                    interrupted = True
+                                    break
+                                if chunk:
+                                    output.write(chunk)
+                        finally:
+                            response.close()
+                finally:
+                    response.close()
+                expected = response.headers.get("Content-Length", response.headers.get("content-length"))
+                if expected and str(expected).isdigit() and partial.stat().st_size != int(expected):
+                    interrupted = True
+                if interrupted:
+                    partial.unlink(missing_ok=True)
+                    ctx.waiting("Stem download was interrupted; restarting this file from byte zero", since=started)
+                    self._recover(ctx, "Waiting to resume the original stem download", retry_after=BUSY_BASE_BACKOFF, retrieval=True)
+                    continue
+                if not partial.stat().st_size or not _validate_audio(partial, ctx.check):
+                    return False
+                ctx.check()
+                os.replace(partial, destination)
+                return True
+        finally:
+            partial.unlink(missing_ok=True)
+
+    def _download_stems(self, target, stem_urls, requested, out_dir, progress_cb, cancel_cb, ctx=None):
+        ctx = ctx or _Operation(target, requested, cancel_cb)
+        produced = {}
+        for name, raw_url in stem_urls.items():
+            stem = _normalize_stem_id(str(name))
+            if stem not in requested or stem in produced or not isinstance(raw_url, str) or not raw_url:
+                continue
+            ctx.check()
+            ctx.state("downloading", f"Downloading {stem}")
+            if progress_cb:
+                progress_cb(.72 + .22 * len(produced) / max(1, len(requested)), f"Downloading {stem}")
+            suffix = Path(urlsplit(raw_url).path).suffix.lower()
+            destination = out_dir / f"{stem}{suffix if suffix in AUDIO_EXTENSIONS else '.wav'}"
+            if self._download_file(ctx, urljoin(target.url + "/", raw_url), destination, stem):
+                produced[stem] = destination
         return produced
 
-    def _incomplete_error(
-        self,
-        requested: list[str],
-        stem_urls: dict,
-        attempt: int,
-        out_dir: Path,
-    ) -> IncompleteSeparationError | None:
+    def _incomplete_error(self, requested, stem_urls, attempt, out_dir):
         available = _available_supported_stems(stem_urls)
         missing = tuple(stem for stem in requested if stem not in available)
-        if not missing:
-            return None
-        return IncompleteSeparationError(
-            missing,
-            available,
-            attempts=attempt,
-            temp_free_bytes=_temp_volume_free_bytes(out_dir),
-        )
+        return IncompleteSeparationError(missing, available, attempts=attempt,
+                                        temp_free_bytes=_temp_volume_free_bytes(out_dir)) if missing else None
 
-    def _log_incomplete(self, error: IncompleteSeparationError) -> None:
-        missing = ",".join(error.missing)
-        available = ",".join(error.available) or "none"
+    def _log_incomplete(self, error):
         if error.temp_free_bytes is None:
-            space = "MinusMix temporary-work-volume free space could not be measured"
+            space = "temporary-work-volume free space could not be measured"
         else:
-            free_gib = error.temp_free_bytes / 1024**3
             relation = "below" if error.temp_free_bytes < LOW_TEMP_SPACE_BYTES else "not below"
-            space = (
-                f"MinusMix temporary-work volume had {free_gib:.1f} GiB free "
-                f"({relation} the {LOW_TEMP_SPACE_BYTES / 1024**3:.0f} GiB warning threshold)"
-            )
-        self.log.warning(
-            "minus_mix: incomplete separation attempt %s/%s; missing=%s; available=%s; %s",
-            error.attempts,
-            INCOMPLETE_ATTEMPTS,
-            missing,
-            available,
-            space,
-        )
+            space = (f"MinusMix temporary-work volume had {error.temp_free_bytes / 1024**3:.1f} GiB free "
+                     f"({relation} the {LOW_TEMP_SPACE_BYTES / 1024**3:.0f} GiB warning threshold)")
+        self.log.warning("minus_mix: incomplete separation attempt %s/%s; missing=%s; available=%s; %s",
+                         error.attempts, INCOMPLETE_ATTEMPTS, ','.join(error.missing), ','.join(error.available), space)
 
-    def _separate_attempt(
-        self,
-        target: ServerTarget,
-        mix: Path,
-        out_dir: Path,
-        requested: list[str],
-        attempt: int,
-        progress_cb: ProgressCallback,
-        cancel_cb: CancelCallback,
-    ) -> dict[str, Path]:
-        payload = self._submit(target, mix, requested, progress_cb, cancel_cb)
-        job_id = _valid_job_id(payload.get("job_id"))
-        attempt_dir: Path | None = None
-        keep_attempt_dir = False
-        terminal = False
-        try:
-            try:
-                polled_job_id, stem_urls, _reported_missing, completed = self._poll_job(
-                    target, payload, progress_cb, cancel_cb,
-                )
-            except _TerminalJobError:
-                terminal = True
-                raise
-            if polled_job_id is not None:
-                job_id = polled_job_id
-            terminal = completed
-            if completed:
-                incomplete = self._incomplete_error(requested, stem_urls, attempt, out_dir)
-                if incomplete is not None:
-                    raise incomplete
-            elif not stem_urls:
-                raise SeparationUnavailable("split server returned no stems")
-
-            attempt_dir = Path(tempfile.mkdtemp(prefix="server_attempt_", dir=out_dir))
-            produced = self._download_stems(
-                target, stem_urls, requested, attempt_dir, progress_cb, cancel_cb,
-            )
-            missing = tuple(stem for stem in requested if stem not in produced)
-            if missing:
-                raise IncompleteSeparationError(
-                    missing,
-                    tuple(stem for stem in SUPPORTED_STEMS if stem in produced),
-                    attempts=attempt,
-                    temp_free_bytes=_temp_volume_free_bytes(out_dir),
-                )
-            keep_attempt_dir = True
-            return {stem: produced[stem] for stem in requested}
-        finally:
-            if attempt_dir is not None and not keep_attempt_dir:
-                shutil.rmtree(attempt_dir, ignore_errors=True)
-            if terminal and job_id is not None:
-                self._cleanup(target, job_id)
-
-    def separate(self, mix: Path, out_dir: Path, stems: tuple[str, ...],
-                 progress_cb: ProgressCallback = None,
-                 cancel_cb: CancelCallback = None) -> dict[str, Path]:
-        requested: list[str] = []
-        for value in stems:
-            stem = str(value).strip().lower()
-            if stem in SUPPORTED_STEMS and stem not in requested:
-                requested.append(stem)
+    def separate(self, mix, out_dir, stems, progress_cb=None, cancel_cb=None, state_cb=None):
+        requested = list(dict.fromkeys(str(stem).strip().lower() for stem in stems if str(stem).strip().lower() in SUPPORTED_STEMS))
         if not requested:
             raise SeparationUnavailable("choose at least one supported instrument stem")
-
-        target, _health, reason = self._resolve()
-        if target is None:
-            raise SeparationUnavailable(reason)
-        if cancel_cb:
-            cancel_cb()
-
-        mix = Path(mix)
-        out_dir = Path(out_dir)
-        out_dir.mkdir(parents=True, exist_ok=True)
+        target = self._targets()[0]
+        ctx = _Operation(target, requested, cancel_cb, state_cb)
+        mix, out_dir = Path(mix), Path(out_dir)
         if not mix.is_file():
             raise SeparationUnavailable("the temporary full-mix audio file is missing")
-
-        last_progress = 0.0
-
-        def report_progress(value: float, message: str) -> None:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        ctx.configuration = self._configuration()[0]
+        ctx.input_identity = _input_identity(mix, ctx.check)
+        _target, health, _reason = self._resolve([target])
+        assessed = self._assessment(target, health, requested)
+        configured, recorded, _model = self._configuration()
+        if not (configured or recorded) and (health is None or health.get("_http_status")):
+            raise SeparationServiceBlocked("Stem Splitter's managed local server is not running; "
+                                           "open Stem Splitter and install/start it", "unavailable")
+        if health is None and configured and recorded and configured != recorded:
+            raise SeparationServiceBlocked("Recorded and configured server ports differ; "
+                                           "start the intended server in Stem Splitter", "endpoint_changed")
+        if not assessed["ready"]:
+            if not assessed["waitable"]:
+                raise SeparationServiceBlocked(assessed["reason"], assessed["state"])
+            assessed = self._recover(ctx, assessed["reason"])
+        ctx.model_engine = assessed.get("model_engine")
+        ctx.model_revision = assessed.get("model_revision")
+        last_progress = 0.
+        def progress(value, detail):
             nonlocal last_progress
             last_progress = max(last_progress, value)
             if progress_cb:
-                progress_cb(last_progress, message)
-
-        attempt_progress = report_progress if progress_cb else None
-        report_progress(0.05, "Connecting to Stem Splitter's managed local server")
-        for attempt in range(1, INCOMPLETE_ATTEMPTS + 1):
+                progress_cb(last_progress, detail)
+        while True:
+            attempt_dir = None
+            keep = False
             try:
-                result = self._separate_attempt(
-                    target,
-                    mix,
-                    out_dir,
-                    requested,
-                    attempt,
-                    attempt_progress,
-                    cancel_cb,
-                )
-            except IncompleteSeparationError as exc:
-                self._log_incomplete(exc)
-                if attempt == INCOMPLETE_ATTEMPTS:
-                    raise
-                report_progress(
-                    0.10,
-                    "Stem Splitter returned an incomplete result; retrying once "
-                    f"in {INCOMPLETE_RETRY_BACKOFF_SECONDS} seconds",
-                )
-                _interruptible_wait(INCOMPLETE_RETRY_BACKOFF_SECONDS, cancel_cb)
-                continue
-            report_progress(1.0, "Temporary stem download complete")
-            return result
-        raise AssertionError("incomplete retry loop exited unexpectedly")
+                payload = self._submit(target, mix, requested, progress, cancel_cb, ctx)
+                _job, urls, _missing, _complete = self._poll_job(target, payload, progress, cancel_cb, ctx)
+                incomplete = self._incomplete_error(requested, urls, ctx.recomputations + 1, out_dir)
+                if incomplete:
+                    raise incomplete
+                attempt_dir = Path(tempfile.mkdtemp(prefix="server_attempt_", dir=out_dir))
+                produced = self._download_stems(target, urls, requested, attempt_dir, progress, cancel_cb, ctx)
+                missing = tuple(stem for stem in requested if stem not in produced)
+                if missing:
+                    raise IncompleteSeparationError(missing, tuple(produced), attempts=ctx.recomputations + 1,
+                                                    temp_free_bytes=_temp_volume_free_bytes(out_dir))
+                ctx.check()
+                progress(1., "Temporary stem download complete")
+                ctx.check()
+                keep = True
+                return {stem: produced[stem] for stem in requested}
+            except (IncompleteSeparationError, _LostResult) as exc:
+                if isinstance(exc, IncompleteSeparationError):
+                    self._log_incomplete(exc)
+                    if ctx.recomputations >= INCOMPLETE_ATTEMPTS - 1:
+                        raise
+                detail = "Original separation result was lost or incomplete; retrying once with the same input and selected model. Updated model weights may be used"
+                ctx.recompute(detail)
+                progress(.10, detail)
+                if attempt_dir is not None:
+                    shutil.rmtree(attempt_dir, ignore_errors=True)
+                    attempt_dir = None
+                # The latest inventory is relevant only now, before recomputing.
+                # Retrieving a retained old job never passes through this check.
+                self._recover(ctx, detail)
+            finally:
+                if attempt_dir is not None and not keep:
+                    shutil.rmtree(attempt_dir, ignore_errors=True)

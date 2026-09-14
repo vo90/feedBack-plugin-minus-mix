@@ -10,6 +10,13 @@ import pytest
 import separator_client
 
 
+@pytest.fixture(autouse=True)
+def fake_audio_validation(monkeypatch):
+    # These legacy transport fixtures intentionally use tiny arbitrary byte strings.
+    # The separate real HTTP fixture exercises production FFmpeg validation.
+    monkeypatch.setattr(separator_client, "_validate_audio", lambda path, _cancel=None: bool(path.stat().st_size))
+
+
 class FakeResponse:
     def __init__(self, status_code=200, payload=None, *, text="", headers=None, chunks=None):
         self.status_code = status_code
@@ -37,7 +44,6 @@ class FakeRequests:
         self.calls = []
         self.get_responses = []
         self.post_responses = []
-        self.delete_responses = []
 
     def get(self, url, **kwargs):
         self.calls.append(("GET", url, kwargs))
@@ -57,11 +63,7 @@ class FakeRequests:
 
     def delete(self, url, **kwargs):
         self.calls.append(("DELETE", url, kwargs))
-        assert self.delete_responses, f"unexpected DELETE {url}"
-        response = self.delete_responses.pop(0)
-        if isinstance(response, BaseException):
-            raise response
-        return response
+        pytest.fail(f"Unexpected shared-cache deletion: {url}")
 
 
 def _log():
@@ -189,7 +191,7 @@ def test_status_without_server_is_actionable(tmp_path):
     assert "managed local server is not running" in status["reason"]
 
 
-def test_direct_cached_response_streams_only_requested_stem_and_cleans_cache(tmp_path):
+def test_direct_cached_response_streams_only_requested_stem_without_deleting_shared_cache(tmp_path):
     _write_config(tmp_path)
     requests = FakeRequests()
     health = FakeResponse(payload={"status": "ok", "warmup": {"bs_roformer_sw": "ready"}})
@@ -202,10 +204,8 @@ def test_direct_cached_response_streams_only_requested_stem_and_cleans_cache(tmp
         "cached": True,
     })
     downloaded = FakeResponse(chunks=[b"guitar-", b"audio"])
-    cleaned = FakeResponse(payload={"ok": True})
     requests.get_responses.extend([health, downloaded])
     requests.post_responses.append(accepted)
-    requests.delete_responses.append(cleaned)
     mix = tmp_path / "full.ogg"
     mix.write_bytes(b"mix")
 
@@ -216,9 +216,8 @@ def test_direct_cached_response_streams_only_requested_stem_and_cleans_cache(tmp
     assert set(result) == {"guitar"}
     assert result["guitar"].read_bytes() == b"guitar-audio"
     assert not any("vocals.flac" in call[1] for call in requests.calls)
-    assert any(call[0] == "DELETE" and call[1].endswith("/cache/abc-123")
-               for call in requests.calls)
-    assert all(response.closed for response in (health, accepted, downloaded, cleaned))
+    assert not any(call[0] == "DELETE" for call in requests.calls)
+    assert all(response.closed for response in (health, accepted, downloaded))
 
 
 def test_async_current_nightly_job_is_polled_and_progress_is_reported(tmp_path, monkeypatch):
@@ -240,7 +239,6 @@ def test_async_current_nightly_job_is_polled_and_progress_is_reported(tmp_path, 
     requests.post_responses.append(FakeResponse(payload={
         "job_id": "job-9", "status": "processing",
     }))
-    requests.delete_responses.append(FakeResponse(payload={"ok": True}))
     mix = tmp_path / "full.flac"
     mix.write_bytes(b"mix")
     progress = []
@@ -271,7 +269,6 @@ def test_remote_url_and_api_key_are_never_used_for_separation(tmp_path):
         "job_id": "job-safe",
         "stems": {"guitar": "/download/job-safe/guitar.flac"},
     }))
-    requests.delete_responses.append(FakeResponse(payload={"ok": True}))
     mix = tmp_path / "full.ogg"
     mix.write_bytes(b"mix")
 
@@ -284,51 +281,39 @@ def test_remote_url_and_api_key_are_never_used_for_separation(tmp_path):
     assert all(call[2].get("headers") is None for call in requests.calls)
 
 
-def test_connection_loss_reports_managed_local_server_action(tmp_path):
+def test_connection_loss_exhaustion_blocks_pending_batch_rows(tmp_path, monkeypatch):
     _write_config(tmp_path)
+    clock = [0.0]
+    monkeypatch.setattr(separator_client.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(separator_client.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds))
     requests = FakeRequests()
-    requests.get_responses.append(FakeResponse(payload={
-        "status": "ok", "warmup": {"bs_roformer_sw": "ready"},
-    }))
+    requests.get_responses.extend([FakeResponse(payload={"status": "ok"}), ConnectionError("offline")])
     requests.post_responses.append(ConnectionError("offline"))
     mix = tmp_path / "full.ogg"
     mix.write_bytes(b"mix")
-
-    with pytest.raises(
-        separator_client.SeparationUnavailable,
-        match="managed local server; start or restart it",
-    ):
-        separator_client.SeparationClient(tmp_path, _log(), requests).separate(
-            mix, tmp_path / "work", ("guitar",),
-        )
+    with pytest.raises(separator_client.SeparationServiceBlocked, match="recovery time limit") as raised:
+        separator_client.SeparationClient(tmp_path, _log(), requests).separate(mix, tmp_path / "work", ("guitar",))
+    assert raised.value.state == "recovery_exhausted"
+    assert sum(call[0] == "POST" for call in requests.calls) == 1
 
 
-def test_busy_server_retries_then_returns_its_error(tmp_path, monkeypatch):
+def test_busy_server_waits_for_recovery_budget_instead_of_failing_after_six_retries(tmp_path, monkeypatch):
     _write_config(tmp_path)
-    monkeypatch.setattr(separator_client, "_interruptible_wait", lambda *_args: None)
+    clock = [0.0]
+    monkeypatch.setattr(separator_client.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(separator_client.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds))
     requests = FakeRequests()
-    requests.get_responses.append(FakeResponse(payload={
-        "status": "ok", "warmup": {"bs_roformer_sw": "ready"},
-    }))
-    requests.post_responses.extend([
-        FakeResponse(status_code=503, text="GPU queue full")
-        for _attempt in range(separator_client.BUSY_RETRIES)
-    ])
+    requests.get_responses.append(FakeResponse(payload={"status": "ok"}))
+    requests.get_responses.extend(FakeResponse(status_code=503) for _ in range(60))
+    requests.post_responses.append(FakeResponse(status_code=503, text="GPU queue full"))
     mix = tmp_path / "full.ogg"
     mix.write_bytes(b"mix")
-    progress = []
-
-    with pytest.raises(
-        separator_client.SeparationUnavailable,
-        match=r"split server error \(503\): GPU queue full",
-    ):
+    states = []
+    with pytest.raises(separator_client.SeparationServiceBlocked, match="recovery time limit"):
         separator_client.SeparationClient(tmp_path, _log(), requests).separate(
-            mix, tmp_path / "work", ("guitar",),
-            progress_cb=lambda _value, message: progress.append(message),
-        )
-
-    assert sum(call[0] == "POST" for call in requests.calls) == separator_client.BUSY_RETRIES
-    assert any("managed local server is busy" in message for message in progress)
+            mix, tmp_path / "work", ("guitar",), state_cb=states.append)
+    assert sum(call[0] == "POST" for call in requests.calls) == 1
+    assert any("managed local server is busy" in item["detail"] for item in states)
 
 
 def test_non_json_submit_response_is_actionable(tmp_path):
@@ -394,6 +379,7 @@ def test_completed_incomplete_result_is_cleaned_and_retried_once(
         FakeResponse(payload={
             "status": "ok", "warmup": {"bs_roformer_sw": "ready"},
         }),
+        FakeResponse(payload={"status": "ok"}),
         FakeResponse(chunks=[b"guitar stem"]),
     ])
     requests.post_responses.extend([
@@ -407,10 +393,6 @@ def test_completed_incomplete_result_is_cleaned_and_retried_once(
             "status": "complete",
             "stems": {"guitar": "/download/job-complete-2/guitar.flac"},
         }),
-    ])
-    requests.delete_responses.extend([
-        FakeResponse(payload={"ok": True}),
-        FakeResponse(payload={"ok": True}),
     ])
     mix = tmp_path / "full.ogg"
     mix.write_bytes(b"mix")
@@ -433,7 +415,7 @@ def test_completed_incomplete_result_is_cleaned_and_retried_once(
         "stems": "guitar",
     }
     assert [call[0] for call in requests.calls] == [
-        "GET", "POST", "DELETE", "POST", "GET", "DELETE",
+        "GET", "POST", "GET", "POST", "GET",
     ]
     assert not any("vocals.flac" in call[1] for call in requests.calls)
     assert any("retrying once" in message for _value, message in progress)
@@ -441,8 +423,7 @@ def test_completed_incomplete_result_is_cleaned_and_retried_once(
         value for value, _message in progress
     )
     delete_urls = [call[1] for call in requests.calls if call[0] == "DELETE"]
-    assert delete_urls[0].endswith("/cache/job-missing-1")
-    assert delete_urls[1].endswith("/cache/job-complete-2")
+    assert delete_urls == []
     assert len(warnings) == 1
     assert "not below the 10 GiB warning threshold" in warnings[0]
 
@@ -461,6 +442,7 @@ def test_two_incomplete_results_raise_typed_diagnostic_with_low_temp_space(
     requests.get_responses.append(FakeResponse(payload={
         "status": "ok", "warmup": {"bs_roformer_sw": "ready"},
     }))
+    requests.get_responses.append(FakeResponse(payload={"status": "ok"}))
     requests.post_responses.extend([
         FakeResponse(payload={
             "job_id": "job-missing-1",
@@ -472,10 +454,6 @@ def test_two_incomplete_results_raise_typed_diagnostic_with_low_temp_space(
             "status": "complete",
             "stems": {"bass": "/download/job-missing-2/bass.flac"},
         }),
-    ])
-    requests.delete_responses.extend([
-        FakeResponse(payload={"ok": True}),
-        FakeResponse(payload={"ok": True}),
     ])
     mix = tmp_path / "full.ogg"
     mix.write_bytes(b"mix")
@@ -496,10 +474,9 @@ def test_two_incomplete_results_raise_typed_diagnostic_with_low_temp_space(
     assert "Only 0.5 GiB was free" in str(error)
     assert "low temporary disk space may have contributed" in str(error)
     assert sum(call[0] == "POST" for call in requests.calls) == 2
-    assert sum(call[0] == "DELETE" for call in requests.calls) == 2
+    assert sum(call[0] == "DELETE" for call in requests.calls) == 0
     delete_urls = [call[1] for call in requests.calls if call[0] == "DELETE"]
-    assert delete_urls[0].endswith("/cache/job-missing-1")
-    assert delete_urls[1].endswith("/cache/job-missing-2")
+    assert delete_urls == []
     assert len(warnings) == 2
     assert all("below the 10 GiB warning threshold" in warning for warning in warnings)
     assert not list((tmp_path / "work").iterdir())
@@ -523,7 +500,6 @@ def test_server_failed_result_is_cleaned_without_incomplete_retry_or_disk_probe(
         "status": "failed",
         "error": "GPU out of memory",
     }))
-    requests.delete_responses.append(FakeResponse(payload={"ok": True}))
     mix = tmp_path / "full.ogg"
     mix.write_bytes(b"mix")
 
@@ -536,7 +512,7 @@ def test_server_failed_result_is_cleaned_without_incomplete_retry_or_disk_probe(
         )
 
     assert sum(call[0] == "POST" for call in requests.calls) == 1
-    assert sum(call[0] == "DELETE" for call in requests.calls) == 1
+    assert sum(call[0] == "DELETE" for call in requests.calls) == 0
 
 
 def test_async_failed_job_is_terminal_and_cleaned_without_retry(tmp_path, monkeypatch):
@@ -558,7 +534,6 @@ def test_async_failed_job_is_terminal_and_cleaned_without_retry(tmp_path, monkey
         "job_id": "job-async-failed",
         "status": "processing",
     }))
-    requests.delete_responses.append(FakeResponse(payload={"ok": True}))
     mix = tmp_path / "full.ogg"
     mix.write_bytes(b"mix")
 
@@ -572,8 +547,7 @@ def test_async_failed_job_is_terminal_and_cleaned_without_retry(tmp_path, monkey
 
     assert sum(call[0] == "POST" for call in requests.calls) == 1
     delete_calls = [call for call in requests.calls if call[0] == "DELETE"]
-    assert len(delete_calls) == 1
-    assert delete_calls[0][1].endswith("/cache/job-async-failed")
+    assert delete_calls == []
 
 
 def test_cancellation_while_job_is_pending_does_not_delete_active_job(tmp_path):
@@ -585,7 +559,7 @@ def test_cancellation_while_job_is_pending_does_not_delete_active_job(tmp_path):
 
         def __call__(self):
             self.calls += 1
-            if self.calls >= 3:
+            if any(call[0] == "POST" for call in requests.calls):
                 raise RuntimeError("canceled")
 
     requests = FakeRequests()
@@ -633,7 +607,7 @@ def test_timeout_while_job_is_pending_does_not_delete_active_job(tmp_path, monke
             mix, tmp_path / "work", ("guitar",),
         )
 
-    assert sum(call[0] == "POST" for call in requests.calls) == 1
+    assert sum(call[0] == "POST" for call in requests.calls) == 0
     assert sum(call[0] == "DELETE" for call in requests.calls) == 0
 
 
@@ -658,7 +632,6 @@ def test_download_error_is_cleaned_without_incomplete_retry_or_leftovers(
         "status": "complete",
         "stems": {"guitar": "/download/job-download-failed/guitar.flac"},
     }))
-    requests.delete_responses.append(FakeResponse(payload={"ok": True}))
     mix = tmp_path / "full.ogg"
     mix.write_bytes(b"mix")
 
@@ -671,7 +644,7 @@ def test_download_error_is_cleaned_without_incomplete_retry_or_leftovers(
         )
 
     assert sum(call[0] == "POST" for call in requests.calls) == 1
-    assert sum(call[0] == "DELETE" for call in requests.calls) == 1
+    assert sum(call[0] == "DELETE" for call in requests.calls) == 0
     assert not list((tmp_path / "work").iterdir())
 
 
@@ -691,6 +664,7 @@ def test_empty_download_is_removed_then_incomplete_result_is_retried(
             "status": "ok", "warmup": {"bs_roformer_sw": "ready"},
         }),
         FakeResponse(chunks=[]),
+        FakeResponse(payload={"status": "ok"}),
         FakeResponse(chunks=[b"guitar stem"]),
     ])
     requests.post_responses.extend([
@@ -705,10 +679,6 @@ def test_empty_download_is_removed_then_incomplete_result_is_retried(
             "stems": {"guitar": "/download/job-complete-2/guitar.flac"},
         }),
     ])
-    requests.delete_responses.extend([
-        FakeResponse(payload={"ok": True}),
-        FakeResponse(payload={"ok": True}),
-    ])
     mix = tmp_path / "full.ogg"
     mix.write_bytes(b"mix")
 
@@ -718,7 +688,7 @@ def test_empty_download_is_removed_then_incomplete_result_is_retried(
 
     assert result["guitar"].read_bytes() == b"guitar stem"
     assert sum(call[0] == "POST" for call in requests.calls) == 2
-    assert sum(call[0] == "DELETE" for call in requests.calls) == 2
+    assert sum(call[0] == "DELETE" for call in requests.calls) == 0
     attempt_dirs = list((tmp_path / "work").glob("server_attempt_*"))
     assert len(attempt_dirs) == 1
     assert not any(path.stat().st_size == 0 for path in (tmp_path / "work").rglob("*.*"))
@@ -740,9 +710,10 @@ def test_cancellation_during_incomplete_retry_backoff_prevents_second_submit(
 
         def __call__(self):
             self.calls += 1
-            if self.calls >= 3:
+            if states and states[-1]["state"] == "waiting_for_server":
                 raise RuntimeError("canceled")
 
+    states = []
     requests = FakeRequests()
     requests.get_responses.append(FakeResponse(payload={
         "status": "ok", "warmup": {"bs_roformer_sw": "ready"},
@@ -752,7 +723,6 @@ def test_cancellation_during_incomplete_retry_backoff_prevents_second_submit(
         "status": "complete",
         "stems": {"vocals": "/download/job-canceled-retry/vocals.flac"},
     }))
-    requests.delete_responses.append(FakeResponse(payload={"ok": True}))
     mix = tmp_path / "full.ogg"
     mix.write_bytes(b"mix")
 
@@ -761,11 +731,11 @@ def test_cancellation_during_incomplete_retry_backoff_prevents_second_submit(
             mix,
             tmp_path / "work",
             ("guitar",),
-            cancel_cb=CancelAtBackoff(),
+            cancel_cb=CancelAtBackoff(), state_cb=states.append,
         )
 
     assert sum(call[0] == "POST" for call in requests.calls) == 1
-    assert sum(call[0] == "DELETE" for call in requests.calls) == 1
+    assert sum(call[0] == "DELETE" for call in requests.calls) == 0
 
 
 def test_failed_and_timed_out_jobs_report_clear_errors(tmp_path, monkeypatch):
@@ -802,7 +772,7 @@ def test_canceled_stream_removes_partial_output(tmp_path):
 
         def __call__(self):
             self.calls += 1
-            if self.calls >= 5:
+            if list((tmp_path / "work").rglob("*.part")):
                 raise RuntimeError("canceled")
 
     requests = FakeRequests()
@@ -813,7 +783,6 @@ def test_canceled_stream_removes_partial_output(tmp_path):
     requests.post_responses.append(FakeResponse(payload={
         "job_id": "job-cancel", "stems": {"guitar": "/download/job-cancel/guitar.flac"},
     }))
-    requests.delete_responses.append(FakeResponse(payload={"ok": True}))
     mix = tmp_path / "full.ogg"
     mix.write_bytes(b"mix")
 
@@ -824,4 +793,4 @@ def test_canceled_stream_removes_partial_output(tmp_path):
 
     assert not list((tmp_path / "work").rglob("*.flac"))
     assert not list((tmp_path / "work").iterdir())
-    assert sum(call[0] == "DELETE" for call in requests.calls) == 1
+    assert sum(call[0] == "DELETE" for call in requests.calls) == 0

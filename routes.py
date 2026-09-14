@@ -65,7 +65,7 @@ def _public_batch(payload: dict | None, *, scan: bool = False) -> dict | None:
         selected: set[int] = set()
 
         # A running row must never disappear just because it is outside the
-        # trailing results window. Failed rows are next in priority because
+        # trailing results window. Blocked and failed rows are next in priority because
         # they contain the information a user can act on.
         for index, item in enumerate(items):
             if item.get("status") == "running":
@@ -73,7 +73,7 @@ def _public_batch(payload: dict | None, *, scan: bool = False) -> dict | None:
         for index in range(len(items) - 1, -1, -1):
             if len(selected) >= MAX_PUBLIC_BATCH_ITEMS:
                 break
-            if items[index].get("status") == "failed":
+            if items[index].get("status") in ("blocked", "failed"):
                 selected.add(index)
 
         # Fill the remaining bounded view with the end of the queue. Sorting

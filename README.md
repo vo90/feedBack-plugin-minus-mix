@@ -159,8 +159,9 @@ before using MinusMix:
 3. On first use, select **Install server + models (~5 GB)** and wait for it to
    finish. This is a one-time setup.
 4. If it is already installed but stopped, select **Start server**.
-5. Open MinusMix. Its status should say that the managed local Stem Splitter
-   server is ready. Use **Refresh status** if needed.
+5. Open MinusMix. Its status should say that the local server is ready or that
+   the model loads when needed. Status refreshes automatically while MinusMix
+   is open; **Refresh status** also checks immediately.
 
 The first installation and model warm-up can take a while. A supported NVIDIA
 GPU makes separation much faster, but Stem Splitter can also run on the CPU.
@@ -168,6 +169,26 @@ GPU makes separation much faster, but Stem Splitter can also run on the CPU.
 MinusMix currently supports only this managed local server. Stem Splitter's
 remote/custom servers, Docker server, and in-app engines are not used by
 MinusMix. You do not need to configure any of those options.
+
+### Server updates and restarts
+
+MinusMix supports both the older local server used with Nightly and the updated
+managed server. You do not need to update the server just to use MinusMix.
+Server, model and dependency updates remain the responsibility of Stem Splitter;
+MinusMix checks the local server's public API and available outputs instead of
+requiring a particular server version or graphics card.
+
+If the server is updating or temporarily disconnects during an export, MinusMix
+shows **Waiting for the stem server** and continues automatically when possible.
+The current song stays active and later batch songs stay queued. You can cancel
+while it waits. If the selected model is missing, the server endpoint changes,
+or recovery takes too long, the job stops with an **action needed** message.
+After fixing the problem in Stem Splitter, scan and start the unfinished work
+again; keep **Skip outputs already created** enabled to preserve completed batch copies.
+
+An older server's skipped startup loading means the model can load on the first
+export. A newer server can also verify that the model files are installed without
+loading them at startup. Neither state requires an earlier Stem Splitter song job.
 
 ## Install MinusMix
 
@@ -266,10 +287,11 @@ you cancel, and existing files are not overwritten.
 | What you see | What to do |
 | --- | --- |
 | “Managed local server is not running” | Open **Settings → Stem Splitter**, find **Local demucs server**, and select **Start server**. Return to MinusMix and select **Refresh status**. |
-| Models are downloading or warming up | Wait for Stem Splitter to report that the models are ready. The first setup takes longer than later uses. |
-| The server is busy | Wait for its current job to finish, then try again. Batch mode already runs one separation at a time. |
-| Connection lost or separation interrupted | Restart the managed local server and retry. Your source song was not changed. |
-| **Create MinusMix FeedPak** is disabled | Select a song, at least one instrument, and an output folder. If separation is needed, also make sure the server status is ready. |
+| Models are downloading or warming up | An accepted export waits automatically. The first setup takes longer than later uses. |
+| The server is busy or updating | Leave the export running to continue automatically, or cancel. Later batch songs remain queued. |
+| Connection lost or separation interrupted | MinusMix reconnects to the same local server. If it stops with an action-needed message, check Stem Splitter and retry unfinished work. |
+| The selected model or instrument is unavailable | Install/select a suitable model in Stem Splitter. MinusMix does not silently substitute another model. |
+| **Create MinusMix FeedPak** is disabled | Select a song, at least one instrument, and an output folder. If separation is needed, resolve any missing-model or incompatible-server message. |
 | MinusMix cannot write to the output folder | Choose another existing folder that your user account can write to, such as a folder inside Documents. |
 | A song is not listed | Make sure it is a local `.feedpak` or `.sloppak`, then select **Refresh** beside the song search. |
 | Some instrument sound remains | AI separation is an estimate. Bleed is more likely when instruments overlap heavily in the original recording. |
@@ -329,9 +351,11 @@ writes them into the source FeedPak.
 
 If the source already contains the selected stems, MinusMix takes a server-free
 fast path. Otherwise, requested audio is streamed into the temporary workspace
-rather than buffered in memory. After the download, MinusMix asks the server to
-delete that job's result cache; server TTL cleanup remains a fallback. The whole
-temporary separation directory is deleted after export.
+rather than buffered in memory. Interrupted files restart from byte zero, and
+FFmpeg verifies readable audio before it is used. MinusMix leaves shared server
+results to the server's bounded cache cleanup so another client or a reconnecting
+export can still retrieve them. Its own temporary separation directory is deleted
+after export.
 
 The subtraction happens on decoded audio in FFmpeg. The playable mix and its
 optional preview are normally rendered together from one decode graph. An
@@ -356,13 +380,28 @@ is discouraged because each generation includes another lossy audio encode.
 
 ### Compatibility and server scope
 
-- Compatible with the current main/nightly managed local Stem Splitter HTTP
-  contract.
-- Converting an unsplit FeedPak requires the managed local server to be running
-  and ready.
+- Supports the older local HTTP contract and managed runtime schema 1 with
+  verified model capabilities. No server/plugin version number is pinned.
+- Compatible server/model/dependency updates do not require a MinusMix update.
+  A future breaking public API change may require a client update.
+- Converting an unsplit FeedPak requires the selected local server and requested
+  model outputs; temporary startup/update states can wait automatically.
 - A FeedPak with the selected saved stems does not require the server.
 - Remote/custom servers, Docker sidecars and Stem Splitter's in-app engines are
   outside the current MinusMix support scope.
+
+Each separation keeps its original endpoint, logical model and input. It tries
+to retrieve an accepted result after a restart even if the replacement runtime
+no longer includes that model. Lost or incomplete results permit at most one
+recomputation; updated weights may be used for the whole replacement attempt.
+Stems from separate attempts are never combined. A lost upload response can
+cause extra server computation because the API has no durable idempotency key,
+but MinusMix publishes only one completed local output per export.
+
+Recovery has a cumulative 35-minute allowance, separate from a 35-minute useful
+processing allowance, with a 70-minute total limit. These are maximums; work
+continues as soon as the server recovers. Cancel is checked during waits and
+streaming; a currently blocked network call must reach its bounded timeout first.
 
 ### Batch implementation
 

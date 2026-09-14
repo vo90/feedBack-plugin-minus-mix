@@ -16,7 +16,27 @@
     return explicitPreselect || '';
   }
 
-  function engineStatusPresentation(needsSeparation, contextKnown, engine) {
+  function separationAdmission(needsSeparation, engine, requiredStems) {
+    if (!needsSeparation) return { allowed: true, reason: '' };
+    engine = engine || {};
+    var reason = engine.reason || 'start the managed local server in Stem Splitter';
+    if (['missing_model', 'unsupported_stems', 'incompatible'].indexOf(engine.state) >= 0) {
+      return { allowed: false, reason: reason };
+    }
+    if (Array.isArray(engine.supported_stems)) {
+      var missing = (requiredStems || []).filter(function (stem) {
+        return engine.supported_stems.indexOf(stem) < 0;
+      });
+      if (missing.length) {
+        return { allowed: false, reason: 'The selected model'
+          + (engine.model ? ' (' + engine.model + ')' : '') + ' does not provide '
+          + missing.join(', ') + '. Choose a model with these stems in Stem Splitter.' };
+      }
+    }
+    return { allowed: !!(engine.ready || engine.waitable), reason: reason };
+  }
+
+  function engineStatusPresentation(needsSeparation, contextKnown, engine, requiredStems) {
     engine = engine || {};
     if (!needsSeparation) {
       return {
@@ -26,13 +46,22 @@
           : 'The managed local Stem Splitter server is only required when selected audio is not already saved.',
       };
     }
+    var admission = separationAdmission(true, engine, requiredStems);
+    if (admission.allowed && engine.waitable && !engine.ready) {
+      return { kind: 'not-ready', text: 'Waiting for the stem server — '
+        + admission.reason + '. Your export will continue automatically when available.' };
+    }
+    if (admission.allowed && engine.state === 'on_demand') {
+      return { kind: 'ready', text: 'Stem server available — '
+        + (engine.reason || 'the model loads when needed; it has not been verified yet') };
+    }
     return {
-      kind: engine.ready ? 'ready' : 'not-ready',
-      text: engine.ready
+      kind: admission.allowed ? 'ready' : 'not-ready',
+      text: admission.allowed
         ? 'Managed local Stem Splitter server ready — '
           + (engine.reason || 'temporary separation available')
         : 'Temporary separation unavailable — '
-          + (engine.reason || 'start the managed local server in Stem Splitter'),
+          + admission.reason,
     };
   }
 
@@ -84,7 +113,7 @@
     if (typeof module !== 'undefined' && module.exports) {
       module.exports = {
         sourceResultIsCurrent, resolvedSourceSelection,
-        engineStatusPresentation, nextTabIndex, createApiClient,
+        engineStatusPresentation, separationAdmission, nextTabIndex, createApiClient,
       };
     }
     return;
@@ -111,10 +140,13 @@
     inited: false, busy: false, selectedFilename: '', selectedLabel: '',
     sourceInfo: null, searchTimer: null, sourceRequestId: 0, ffmpegAvailable: true,
     statusRetryTimer: null, statusLoading: false,
-    singleJobId: '', singlePollTimer: null, singleNotifiedId: '',
+    singleJobId: '', singlePollTimer: null, singleNotifiedId: '', singleStage: '',
+    singleDetail: '', singleStatusRequestId: 0, singleMutationPending: false,
     batchScan: null, batchScanKey: '', batchJobId: '', batchPollTimer: null,
     batchScanJobId: '', batchScanPollTimer: null, batchScanRequestKey: '',
     batchBusy: false, batchActive: false, batchNotifiedId: '',
+    batchStatus: '', batchStage: '', batchDetail: '',
+    batchStatusRequestId: 0, batchMutationPending: false,
     batchPollLoading: false, batchPollFailures: 0,
     batchRenderKey: '', batchItemRows: Object.create(null),
     separation: {
@@ -183,6 +215,8 @@
       separating: 'Splitting audio with AI', rendering: 'Creating backing track',
       preview: 'Creating preview', packaging: 'Packaging FeedPak', done: 'Completed',
       canceling: 'Canceling', canceled: 'Canceled', failed: 'Failed', skipped: 'Skipped',
+      waiting_for_server: 'Waiting for the stem server',
+      blocked: 'Stopped — action needed', interrupted: 'Interrupted',
     };
     return labels[stage] || String(stage || 'Working').replace(/_/g, ' ');
   }
@@ -246,11 +280,27 @@
     }
   }
 
-  function selectionNeedsSeparation(stems) {
-    if (!state.sourceInfo || !Array.isArray(state.sourceInfo.stems)) return false;
-    return stems.some(function (stemId) {
+  function selectionRequiredStems(stems) {
+    if (!state.sourceInfo || !Array.isArray(state.sourceInfo.stems)) return [];
+    return stems.filter(function (stemId) {
       var meta = state.sourceInfo.stems.find(function (stem) { return stem.id === stemId; });
       return !!(meta && meta.requires_separation);
+    });
+  }
+
+  function selectionNeedsSeparation(stems) {
+    return selectionRequiredStems(stems).length > 0;
+  }
+
+  function batchRequiredStems(scan) {
+    if (!scan) return [];
+    if (Array.isArray(scan.required_separation_stems)) return scan.required_separation_stems;
+    // Older scan payloads have no aggregate; only inspect rows that need AI.
+    return selectedBatchStems().filter(function (stem) {
+      return (scan.items || []).some(function (item) {
+        return item.scan_status === 'ready' && item.needs_separation
+          && (item.saved_stems || []).indexOf(stem) < 0;
+      });
     });
   }
 
@@ -259,12 +309,14 @@
     if (!root || !text) return;
     var engine = state.separation || {};
     var batchMode = !!($('pmx-batch-panel') && !$('pmx-batch-panel').hidden);
-    var currentScan = state.batchScan && state.batchScanKey === batchOptionsKey();
+    var currentScan = state.batchScanKey === batchOptionsKey() ? state.batchScan : null;
     var contextKnown = batchMode ? !!currentScan : !!state.sourceInfo;
     var needsSeparation = batchMode
       ? !!(currentScan && currentScan.counts && currentScan.counts.needs_separation)
       : selectionNeedsSeparation(selectedStems());
-    var presentation = engineStatusPresentation(needsSeparation, contextKnown, engine);
+    var requiredStems = batchMode ? batchRequiredStems(currentScan)
+      : selectionRequiredStems(selectedStems());
+    var presentation = engineStatusPresentation(needsSeparation, contextKnown, engine, requiredStems);
     root.className = 'pmx-engine ' + presentation.kind;
     text.textContent = presentation.text;
   }
@@ -284,7 +336,8 @@
     renderEngineStatus();
     var stems = selectedStems();
     var needsSeparation = selectionNeedsSeparation(stems);
-    var engineOkay = !needsSeparation || !!(state.separation && state.separation.ready);
+    var admission = separationAdmission(needsSeparation, state.separation, selectionRequiredStems(stems));
+    var engineOkay = admission.allowed;
     var ready = !!state.selectedFilename && !!state.sourceInfo && stems.length > 0
       && !!outputFolder() && !state.busy && !state.batchActive && state.ffmpegAvailable && engineOkay;
     var button = $('pmx-export');
@@ -297,7 +350,14 @@
     });
     var title = $('pmx-summary-title'), detail = $('pmx-summary-detail');
     if (!title || !detail) return;
-    if (state.busy) {
+    if (state.busy && state.singleStage === 'canceling') {
+      title.textContent = 'Canceling export';
+      detail.textContent = state.singleDetail || 'Stopping at a safe checkpoint…';
+    } else if (state.busy && state.singleStage === 'waiting_for_server') {
+      title.textContent = 'Waiting for the stem server';
+      detail.textContent = (state.singleDetail || 'Your export will continue automatically when available.')
+        + ' You can cancel safely.';
+    } else if (state.busy) {
       title.textContent = 'Creating MinusMix FeedPak…';
       detail.textContent = (needsSeparation ? 'Temporarily separating, then rendering' : 'Rendering')
         + ' the full mix minus ' + stems.map(labelFor).join(' + ') + '. The source remains untouched.';
@@ -305,9 +365,12 @@
       title.textContent = 'Create “No ' + stems.map(labelFor).join(' + ') + '” copy';
       detail.textContent = 'Single-stem output • native backing playback • source preserved'
         + (needsSeparation ? ' • temporary separation' : ' • existing stem reused');
-    } else if (needsSeparation && !(state.separation && state.separation.ready)) {
-      title.textContent = 'Start the managed local Stem Splitter server first';
-      detail.textContent = (state.separation && state.separation.reason) || 'The selected audio must be separated temporarily.';
+      if (needsSeparation && state.separation.waitable && !state.separation.ready) {
+        detail.textContent += ' • waits for the server and continues automatically';
+      }
+    } else if (needsSeparation && !engineOkay) {
+      title.textContent = 'Temporary separation needs attention';
+      detail.textContent = admission.reason;
     } else {
       title.textContent = 'Ready when you are';
       detail.textContent = 'Select a song, at least one stem, and an output folder.';
@@ -467,12 +530,16 @@
     state.singleJobId = job.id || '';
     var active = ['queued', 'running', 'canceling'].indexOf(job.status) >= 0;
     state.busy = active;
+    state.singleStage = job.status === 'canceling' ? 'canceling' : job.stage || job.status || '';
+    state.singleDetail = job.detail || '';
     var progress = $('pmx-single-progress');
     if (progress) progress.hidden = false;
     setNodeText($('pmx-single-progress-title'), job.status === 'completed'
       ? 'MinusMix FeedPak created' : job.status === 'canceled' ? 'Export canceled'
-        : job.status === 'failed' ? 'Export failed' : stageLabel(job.stage));
-    setNodeText($('pmx-single-current'), stageLabel(job.stage)
+        : job.status === 'failed' ? 'Export failed'
+          : job.status === 'blocked' || job.status === 'interrupted'
+            ? 'Export stopped — action needed' : stageLabel(state.singleStage));
+    setNodeText($('pmx-single-current'), stageLabel(state.singleStage)
       + (job.detail ? ' — ' + job.detail : ''));
     if ($('pmx-single-progress-bar')) {
       $('pmx-single-progress-bar').value = Number(job.progress || 0);
@@ -487,7 +554,12 @@
       clearTimeout(state.singlePollTimer);
       state.singlePollTimer = null;
     }
-    if (!active && job.status === 'completed' && job.result) {
+    if (active && state.singleStage === 'waiting_for_server') {
+      showStatus('info', 'Waiting for the stem server. '
+        + (job.detail || 'Your export will continue automatically when available.'));
+    } else if (active) {
+      showStatus('info', stageLabel(state.singleStage) + (job.detail ? ' — ' + job.detail : ''));
+    } else if (job.status === 'completed' && job.result) {
       var result = job.result;
       var temporary = result.temporary_separation_used ? ' Temporary separator files were deleted.' : '';
       var preview = result.preview_created === false
@@ -506,32 +578,53 @@
         state.singleNotifiedId = job.id;
         notify('MinusMix export failed', job.detail || 'Export failed', 'warn');
       }
+    } else if (!active && (job.status === 'blocked' || job.status === 'interrupted')) {
+      showStatus('error', 'Export stopped. ' + (job.detail || 'The stem server needs attention.')
+        + ' The source was not changed. You can retry after resolving the problem.');
+      if (job.id && state.singleNotifiedId !== job.id) {
+        state.singleNotifiedId = job.id;
+        notify('MinusMix export stopped', job.detail || 'The stem server needs attention.', 'warn');
+      }
     }
     updateReady();
     updateBatchReady();
   }
 
   function pollSingleExport() {
-    if (!state.singleJobId) return;
-    apiClient.exportStatus(state.singleJobId).then(renderSingleJob).catch(function (error) {
+    if (!state.singleJobId || state.singleMutationPending) return;
+    var requestId = ++state.singleStatusRequestId;
+    apiClient.exportStatus(state.singleJobId).then(function (job) {
+      if (requestId === state.singleStatusRequestId) renderSingleJob(job);
+    }).catch(function (error) {
+      if (requestId !== state.singleStatusRequestId) return;
       showStatus('error', 'Could not refresh export status: ' + error.message);
       scheduleSinglePoll(2500);
     });
   }
 
   function loadLatestSingleExport() {
+    if (state.singleMutationPending) return;
+    if (state.busy && state.singleJobId) { pollSingleExport(); return; }
+    var requestId = ++state.singleStatusRequestId;
     apiClient.latestExport().then(function (data) {
-      if (data.job) renderSingleJob(data.job);
+      if (requestId === state.singleStatusRequestId && data.job) renderSingleJob(data.job);
     }).catch(function () {});
   }
 
   function cancelSingleExport() {
-    if (!state.singleJobId || !state.busy) return;
+    if (!state.singleJobId || !state.busy || state.singleMutationPending) return;
+    state.singleMutationPending = true;
+    ++state.singleStatusRequestId;
     if ($('pmx-single-cancel')) $('pmx-single-cancel').disabled = true;
     showStatus('info', 'Cancel requested. The current operation is stopping safely…');
-    apiClient.cancelExport(state.singleJobId).then(renderSingleJob).catch(function (error) {
+    apiClient.cancelExport(state.singleJobId).then(function (job) {
+      state.singleMutationPending = false;
+      renderSingleJob(job);
+    }).catch(function (error) {
+      state.singleMutationPending = false;
       showStatus('error', error.message);
       if ($('pmx-single-cancel')) $('pmx-single-cancel').disabled = false;
+      scheduleSinglePoll(1000);
     });
   }
 
@@ -620,9 +713,11 @@
     renderEngineStatus();
     var options = batchOptions();
     var hasBasics = !!options.input_dir && !!options.output_dir && options.excluded_stems.length > 0;
-    var currentScan = state.batchScan && state.batchScanKey === batchOptionsKey();
+    var currentScan = state.batchScanKey === batchOptionsKey() ? state.batchScan : null;
     var needsSeparation = !!(currentScan && currentScan.counts && currentScan.counts.needs_separation);
-    var engineOkay = !needsSeparation || !!(state.separation && state.separation.ready);
+    var admission = separationAdmission(needsSeparation, state.separation,
+      batchRequiredStems(currentScan));
+    var engineOkay = admission.allowed;
     if ($('pmx-batch-scan')) $('pmx-batch-scan').disabled = !hasBasics || state.busy || state.batchBusy || state.batchActive;
     if ($('pmx-batch-start')) {
       $('pmx-batch-start').disabled = !currentScan || !state.batchScan.counts
@@ -642,6 +737,13 @@
     if (state.busy) {
       title.textContent = 'Single-song export is running';
       detail.textContent = 'Wait for it to finish or cancel it safely before starting a batch.';
+    } else if (state.batchActive && state.batchStage === 'canceling') {
+      title.textContent = 'Canceling batch';
+      detail.textContent = state.batchDetail || 'Stopping at a safe checkpoint…';
+    } else if (state.batchActive && state.batchStage === 'waiting_for_server') {
+      title.textContent = 'Waiting for the stem server';
+      detail.textContent = (state.batchDetail || 'This song will continue automatically when available.')
+        + ' Later songs remain queued. You can cancel safely.';
     } else if (state.batchActive) {
       title.textContent = 'Batch conversion is running';
       detail.textContent = 'One GPU separation runs at a time. You can leave this screen and return later.';
@@ -655,8 +757,14 @@
         + (counts.uses_saved_stems || 0) + ' can reuse saved stems • '
         + ((counts.skipped_existing || 0) + (counts.skipped_derived || 0)) + ' skipped safely';
       if (needsSeparation && !engineOkay) {
-        detail.textContent += ' • start the managed local Stem Splitter server before starting';
+        detail.textContent += ' • ' + admission.reason;
+      } else if (needsSeparation && state.separation.waitable && !state.separation.ready) {
+        detail.textContent += ' • waits for the server and continues automatically';
       }
+    } else if (state.batchStatus === 'blocked' || state.batchStatus === 'interrupted') {
+      title.textContent = 'Batch stopped — action needed';
+      detail.textContent = (state.batchDetail || 'The stem server needs attention.')
+        + ' Completed outputs were kept. Scan again to retry unfinished songs.';
     } else {
       title.textContent = hasBasics ? 'Scan before starting' : 'Choose source and output folders';
       detail.textContent = 'Scan first to preview how many files need AI separation.';
@@ -707,11 +815,14 @@
     var detail = String(item.detail || item.reason
       || (item.needs_separation ? 'Temporary separation' : 'Saved stem'));
     var name = String(item.relative_path || item.title || 'Feedpak');
-    var signature = status + '\u0000' + name + '\u0000' + detail;
+    var displayStatus = !scanMode && status === 'running' && state.batchStatus === 'canceling'
+      ? 'canceling' : !scanMode && status === 'running' && item.stage === 'waiting_for_server'
+        ? 'waiting for server' : status;
+    var signature = displayStatus + '\u0000' + name + '\u0000' + detail;
     if (row._minusMixSignature === signature) return;
     row._minusMixSignature = signature;
     row.className = 'pmx-batch-item ' + status.toLowerCase().replace(/[^a-z0-9_-]/g, '');
-    row._minusMixNodes.status.textContent = status;
+    row._minusMixNodes.status.textContent = displayStatus;
     row._minusMixNodes.name.textContent = name;
     row._minusMixNodes.detail.textContent = detail;
   }
@@ -896,29 +1007,41 @@
     state.batchJobId = job.id || '';
     var active = ['queued', 'running', 'canceling'].indexOf(job.status) >= 0;
     state.batchActive = active;
+    var currentItem = (job.items || []).find(function (item) {
+      return item.status === 'running' || item.status === 'blocked';
+    });
+    state.batchStatus = job.status || '';
+    state.batchStage = job.status === 'canceling' ? 'canceling'
+      : job.stage || (currentItem && currentItem.stage) || job.status || '';
+    state.batchDetail = job.detail || '';
     state.batchPollFailures = 0;
     var progress = $('pmx-batch-progress');
     if (progress) progress.hidden = false;
     setNodeText($('pmx-batch-progress-title'), job.status === 'completed'
       ? 'Batch completed' : job.status === 'canceled' ? 'Batch canceled'
-        : job.status === 'failed' || job.status === 'interrupted' ? 'Batch stopped' : 'Batch running');
+        : job.status === 'blocked' ? 'Batch stopped — action needed'
+          : job.status === 'failed' || job.status === 'interrupted' ? 'Batch stopped'
+            : job.status === 'canceling' ? 'Canceling batch'
+              : state.batchStage === 'waiting_for_server' ? 'Waiting for the stem server' : 'Batch running');
     if ($('pmx-batch-current')) {
-      var runningItem = (job.items || []).find(function (item) { return item.status === 'running'; });
       var position = job.current_item_number
         ? 'Song ' + job.current_item_number + ' of ' + (job.items_total || (job.items || []).length) + ' — '
         : '';
       setNodeText($('pmx-batch-current'), job.current_relative_path
         ? position + job.current_relative_path + ' — '
-          + stageLabel((runningItem && runningItem.stage) || job.status)
+          + stageLabel(state.batchStage)
           + (job.detail ? ': ' + job.detail : '')
         : (job.detail || ''));
     }
     if ($('pmx-batch-progress-bar')) $('pmx-batch-progress-bar').value = Number(job.overall_progress || 0);
     var counts = job.counts || {};
     setNodeHtml($('pmx-batch-counts'), '<span>' + (counts.done || 0) + ' created</span>'
-      + '<span>' + (counts.queued || 0) + ' waiting</span>'
+      + '<span>' + (counts.queued || 0) + ' queued</span>'
+      + (active && state.batchStage === 'waiting_for_server'
+        ? '<span>1 waiting for server</span>' : '')
       + '<span>' + (counts.skipped || 0) + ' skipped</span>'
       + '<span>' + (counts.failed || 0) + ' failed</span>'
+      + ((counts.blocked || 0) ? '<span>' + counts.blocked + ' blocked</span>' : '')
       + ((counts.preview_failures || 0)
         ? '<span>' + counts.preview_failures + ' without preview</span>' : ''));
     if ($('pmx-batch-cancel')) $('pmx-batch-cancel').disabled = !active || job.status === 'canceling';
@@ -935,28 +1058,53 @@
       clearTimeout(state.batchPollTimer);
       state.batchPollTimer = null;
     }
-    if (!active && job.id && state.batchNotifiedId !== job.id) {
-      state.batchNotifiedId = job.id;
+    if (active && state.batchStage === 'waiting_for_server') {
+      showBatchStatus('info', 'Waiting for the stem server. '
+        + (job.detail || 'This song will continue automatically when available.')
+        + ' Later songs remain queued.');
+    } else if (active) {
+      showBatchStatus('info', stageLabel(state.batchStage) + (job.detail ? ' — ' + job.detail : ''));
+    } else {
+      // Render terminal state on return to the screen as well as on first arrival.
+      // Notification deduplication must not suppress a restored blocked status.
       if (job.status === 'completed') {
         showBatchStatus((counts.failed || 0) ? 'error' : 'ok', job.detail || 'Batch completed.');
-        notify('MinusMix batch completed', (counts.done || 0) + ' FeedPaks created', (counts.failed || 0) ? 'warn' : 'ok');
       } else if (job.status === 'canceled') {
         showBatchStatus('info', 'Batch canceled safely. Completed output files were kept.');
       } else {
-        showBatchStatus('error', job.detail || 'Batch stopped.');
+        showBatchStatus('error', 'Batch stopped. ' + (job.detail || 'The operation needs attention.')
+          + ' Completed outputs were kept. Unfinished songs can be retried.');
       }
-      state.batchScan = null;
-      state.batchScanKey = '';
-      updateBatchReady();
+      if (job.id && state.batchNotifiedId !== job.id) {
+        state.batchNotifiedId = job.id;
+        if (job.status === 'completed') {
+          notify('MinusMix batch completed', (counts.done || 0) + ' FeedPaks created', (counts.failed || 0) ? 'warn' : 'ok');
+        } else if (job.status === 'blocked' || job.status === 'interrupted') {
+          notify('MinusMix batch stopped', job.detail || 'The operation needs attention.', 'warn');
+        }
+        state.batchScan = null;
+        state.batchScanKey = '';
+        updateBatchReady();
+      }
     }
   }
 
   function pollBatch() {
     var manual = arguments[0] === true;
-    if (!state.batchJobId || state.batchPollLoading) return;
+    if (!state.batchJobId || state.batchMutationPending) return;
+    if (state.batchPollLoading) {
+      // An invalidated request may still be settling after Cancel or a new start.
+      // Keep the heartbeat alive when its timer fires before that request ends.
+      scheduleBatchPoll(BATCH_POLL_MS);
+      return;
+    }
+    var requestId = ++state.batchStatusRequestId;
     state.batchPollLoading = true;
     if ($('pmx-batch-refresh')) $('pmx-batch-refresh').disabled = true;
-    apiClient.batchStatus(state.batchJobId).then(renderBatchJob).catch(function (error) {
+    apiClient.batchStatus(state.batchJobId).then(function (job) {
+      if (requestId === state.batchStatusRequestId) renderBatchJob(job);
+    }).catch(function (error) {
+      if (requestId !== state.batchStatusRequestId) return;
       state.batchPollFailures += 1;
       var delay = Math.min(POLL_RETRY_MAX_MS,
         2500 * Math.pow(2, Math.min(state.batchPollFailures - 1, 3)));
@@ -971,7 +1119,11 @@
   }
 
   function loadLatestBatch() {
+    if (state.batchMutationPending) return;
+    if (state.batchActive && state.batchJobId) { pollBatch(); return; }
+    var requestId = ++state.batchStatusRequestId;
     apiClient.latestBatch().then(function (data) {
+      if (requestId !== state.batchStatusRequestId) return;
       if (data.job) {
         if (['queued', 'running', 'canceling'].indexOf(data.job.status) < 0) {
           state.batchNotifiedId = data.job.id;
@@ -979,24 +1131,32 @@
         renderBatchJob(data.job);
       }
     }).catch(function (error) {
+      if (requestId !== state.batchStatusRequestId) return;
       renderBatchHeartbeat('error', 'Could not restore the latest batch status: ' + error.message);
     });
   }
 
   function startBatch() {
-    if (state.batchBusy || state.batchActive || !state.batchScan
+    if (state.busy || state.batchBusy || state.batchActive || !state.batchScan
         || state.batchScanKey !== batchOptionsKey()) return;
+    var admission = separationAdmission(!!(state.batchScan.counts || {}).needs_separation,
+      state.separation, batchRequiredStems(state.batchScan));
+    if (!admission.allowed) { showBatchStatus('error', admission.reason); return; }
     state.batchBusy = true;
+    state.batchMutationPending = true;
+    ++state.batchStatusRequestId;
     updateBatchReady();
     showBatchStatus('info', 'Starting sequential conversion. Processing one song at a time for GPU stability…');
     var options = batchOptions();
     options.scan_id = state.batchScan.scan_id || '';
     apiClient.startBatch(options).then(function (job) {
+      state.batchMutationPending = false;
       state.batchNotifiedId = '';
       renderBatchJob(job);
     }).catch(function (error) {
       showBatchStatus('error', error.message);
     }).finally(function () {
+      state.batchMutationPending = false;
       state.batchBusy = false;
       updateBatchReady();
     });
@@ -1012,12 +1172,19 @@
       });
       return;
     }
-    if (!state.batchJobId || !state.batchActive) return;
+    if (!state.batchJobId || !state.batchActive || state.batchMutationPending) return;
+    state.batchMutationPending = true;
+    ++state.batchStatusRequestId;
     $('pmx-batch-cancel').disabled = true;
     showBatchStatus('info', 'Cancel requested. The current operation will stop at a safe checkpoint…');
-    apiClient.cancelBatch(state.batchJobId).then(renderBatchJob).catch(function (error) {
+    apiClient.cancelBatch(state.batchJobId).then(function (job) {
+      state.batchMutationPending = false;
+      renderBatchJob(job);
+    }).catch(function (error) {
+      state.batchMutationPending = false;
       showBatchStatus('error', error.message);
       $('pmx-batch-cancel').disabled = false;
+      scheduleBatchPoll(BATCH_POLL_MS);
     });
   }
 
@@ -1025,7 +1192,14 @@
     if (state.busy || state.batchActive) return;
     var stems = selectedStems();
     if (!state.selectedFilename || !stems.length || !outputFolder()) return;
+    var admission = separationAdmission(selectionNeedsSeparation(stems), state.separation,
+      selectionRequiredStems(stems));
+    if (!admission.allowed) { showStatus('error', admission.reason); return; }
     state.busy = true;
+    state.singleMutationPending = true;
+    ++state.singleStatusRequestId;
+    state.singleStage = 'queued';
+    state.singleDetail = '';
     updateReady();
     showStatus('info', selectionNeedsSeparation(stems)
       ? 'Separating ' + stems.map(labelFor).join(' + ') + ' temporarily, then creating the single-stem feedpak. This can take several minutes…'
@@ -1035,9 +1209,11 @@
       excluded_stems: stems,
       output_dir: outputFolder(),
     }).then(function (job) {
+      state.singleMutationPending = false;
       state.singleNotifiedId = '';
       renderSingleJob(job);
     }).catch(function (error) {
+      state.singleMutationPending = false;
       showStatus('error', error.message);
       notify('MinusMix export failed', error.message, 'warn');
       state.busy = false;

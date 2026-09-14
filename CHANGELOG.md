@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- Support older Nightly local stem servers and managed servers with verified
+  models, including intentionally skipped startup loading, without pinning a
+  server version or requiring a server upgrade.
+- Reconnect through local server updates/restarts, resume retained results and
+  safely retry interrupted audio downloads. Pin the selected endpoint and model;
+  permit one recovery recomputation without combining different attempts.
+- Keep single exports active while waiting and preserve later batch rows. Shared
+  service problems produce a clear blocked outcome instead of failing the queue.
+- Refresh readiness automatically, check only missing requested stems, and retain
+  job polling through navigation/retry races. Saved-stem and audio-reuse exports
+  remain independent of server availability.
+- Verify downloaded audio with existing FFmpeg and leave shared server results
+  to server cache retention instead of deleting another client's possible result.
 - Added an audio-reuse output folder choice: preserve Current original packages
   subfolders by default, or place all resulting FeedPaks in a single folder.
   Previews reserve distinct filenames and retain existing-output verification.

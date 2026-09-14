@@ -13,6 +13,15 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 @pytest.mark.skipif(not NODE, reason="Node.js is required for frontend behavior tests")
+def test_main_screen_managed_and_legacy_server_behaviors():
+    result = subprocess.run(
+        [NODE, "tests/main-ui.test.cjs"], cwd=ROOT,
+        text=True, encoding="utf-8", capture_output=True, timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.skipif(not NODE, reason="Node.js is required for frontend behavior tests")
 def test_search_engine_and_tab_state_helpers():
     script = r"""
 const helpers = require('./screen.js');

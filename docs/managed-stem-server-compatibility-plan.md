@@ -1,6 +1,8 @@
 # MinusMix: local stem server compatibility and update recovery
 
-Implementation plan, 2026-09-14. Product implementation has not started.
+Implemented locally, 2026-09-14, on `feat/minusmix-managed-server-compat`.
+The sections below record the agreed design; the implementation and verification
+record at the end distinguishes tested behavior from remaining deployment checks.
 
 ## Objective and required compatibility
 
@@ -124,3 +126,50 @@ Run the existing configured MinusMix test suite and coverage gate after the focu
 Finally, use isolated test profiles/libraries to run a real MinusMix export against both the older Nightly local server and the unchanged updated server. Include a server update/restart during export and a cold startup with no earlier Stem Splitter job. Use CPU and available CUDA hardware without GPU-specific code; the RTX 4080 PC remains a separate hardware validation target. Do not claim full integration success based only on health fixtures or standalone server inference.
 
 Implement in reviewable steps: contract/discovery plus legacy tests; transport recovery; manager/UI integration; full regression and real local-server validation. Record exact tested revisions and results. All product commits stay in MinusMix, and publication remains a separate decision.
+
+## Implementation and verification record
+
+Implemented the client assessment/recovery loop, single and batch state handling,
+UI admission and automatic status refresh, plus focused protocol, transport,
+manager and DOM regressions. The route fallback snapshot now prioritizes blocked
+rows. No runtime dependency or package-version change was needed.
+
+Final verification: **327 tests passed**, **84.24%** configured module coverage
+(70% required), plus a clean full Ruff check. The suite includes real HTTP/FFmpeg
+single and batch paths, cancellation, cumulative fake-clock limits, old/new
+capability fixtures, bounded 10,000-row blocked history and DOM navigation races.
+
+All product changes are confined to MinusMix. Stem Splitter and both server
+checkouts remained unchanged. Tests use disposable fixtures/configuration/output
+folders; installed dependency/model assets were reused read-only for real server
+checks. No real library, normal app configuration or active server pointer changed.
+
+Real public-API integration results:
+
+| Server and execution | Result |
+|---|---|
+| Older server `115fb80ee927bad300b35bc7cf7cd1fb16505426`, CUDA, skipped cold startup | Actual MinusMix single export completed; one upload, one valid FeedPak, decoded full mix/preview and unchanged source hash. |
+| Updated server `d9edcc85156d77eb4bedc17e4dcd90ed37eb5335`, CUDA, forced process stop before download followed by restart | Waiting stage observed, retained result downloaded without resubmission, one valid output and unchanged source hash. |
+| Updated server, dedicated CPU dependency generation | Actual MinusMix single export completed with decoded full mix/preview and unchanged source hash. |
+| Real HTTP fixture with three-song batch, disconnect during song two and changed runtime generation | First output retained; current item waited and third stayed queued; all three completed with three submissions and no source edits. |
+
+The real ML tests used Python 3.12.10, FFmpeg 8.1.2, an NVIDIA GTX 1650 Max-Q
+(4 GiB, driver 616.92), and the previously installed BS-Roformer model. They ran
+the real client, SingleExportManager and exporter, not only server health or
+standalone inference. The dedicated CPU installation was tested separately from
+the CUDA installation. These checks establish interface/integration compatibility,
+not an assessment of separation quality from synthetic audio.
+
+One separate existing server/dependency issue was reproduced: requesting CPU mode
+using the CUDA dependency generation on this Windows machine fails during
+audio-separator's CUDA-property probe. The server sets `CUDA_VISIBLE_DEVICES` to
+an empty string; this installed PyTorch build then reports CUDA available but zero
+visible devices. The dedicated CPU generation and normal CUDA operation passed.
+This issue is outside the MinusMix-only scope; no server/dependency patch was made.
+
+Remaining deployment checks: the RTX 4080 PC, a clean server/dependency download,
+and the packaged game's installed-plugin UI were not exercised in this change.
+The server-restart check reused verified installed assets and isolated caches;
+it did not run the updater's complete download/install transaction. A future
+breaking public HTTP API still requires a compatibility update. Publication and
+installation into the user's normal game remain separate actions.
