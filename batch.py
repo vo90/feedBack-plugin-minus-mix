@@ -523,10 +523,9 @@ class BatchManager:
 
     def is_active(self) -> bool:
         with self.lock:
-            return self.starting or bool(
-                self.active_id
-                and self.jobs.get(self.active_id, {}).get("status") in ACTIVE_STATUSES
-            )
+            # Terminal status is visible before its history write completes.
+            # The worker keeps this reservation until persistence and cleanup.
+            return self.starting or self.active_id is not None
 
     @staticmethod
     def _normalized_scan_options(options: dict) -> dict:
@@ -739,10 +738,7 @@ class BatchManager:
     def start(self, *, scan_id: str | None = None,
               snapshot_item_limit: int | None = None, **options) -> dict:
         with self.lock:
-            if self.starting or (
-                self.active_id
-                and self.jobs.get(self.active_id, {}).get("status") in ACTIVE_STATUSES
-            ):
+            if self.starting or self.active_id is not None:
                 raise BatchError("another MinusMix batch is already running")
             # Reserve the start before the potentially long authoritative scan.
             # Without this flag two simultaneous POSTs could both pass the

@@ -572,6 +572,70 @@ def test_batch_reserves_start_while_authoritative_scan_is_running(tmp_path):
     _wait(manager, started[0]["id"])
 
 
+@pytest.mark.parametrize("terminal_status", ["completed", "failed"])
+def test_batch_keeps_reservation_until_terminal_history_is_saved(
+    tmp_path, monkeypatch, terminal_status,
+):
+    source_root = tmp_path / "sources"
+    output_root = tmp_path / "outputs"
+    output_root.mkdir()
+    _pak(source_root / "one.feedpak", guitar=True)
+    log = SimpleNamespace(exception=lambda *args, **kwargs: None,
+                          warning=lambda *args, **kwargs: None)
+    manager = batch.BatchManager(FakeExporter(), FakeService(), tmp_path / "config", log)
+    options = dict(input_dir=str(source_root), output_dir=str(output_root),
+                   excluded_stems=["guitar"], skip_existing=False)
+    save_entered = threading.Event()
+    release_save = threading.Event()
+    worker_finished = threading.Event()
+    original_persist = manager._persist
+    original_run = manager._run
+
+    def delayed_terminal_save(force=False):
+        with manager.lock:
+            active = manager.jobs.get(manager.active_id, {})
+            terminal = active.get("status") == terminal_status
+        if force and terminal:
+            save_entered.set()
+            assert release_save.wait(5.0)
+        original_persist(force=force)
+
+    def run_and_signal(job_id):
+        try:
+            original_run(job_id)
+        finally:
+            worker_finished.set()
+
+    def fail_item(context, index):
+        raise RuntimeError("injected worker failure")
+
+    monkeypatch.setattr(manager, "_persist", delayed_terminal_save)
+    monkeypatch.setattr(manager, "_run", run_and_signal)
+    if terminal_status == "failed":
+        monkeypatch.setattr(manager, "_process_item", fail_item)
+    started = manager.start(**options)
+    try:
+        assert save_entered.wait(5.0)
+        assert manager.get(started["id"])["status"] == terminal_status
+        # The worker has published its outcome in memory, but its terminal
+        # history write is still pending. It must retain the queue reservation.
+        saved = json.loads(manager.state_file.read_text(encoding="utf-8"))["jobs"][0]
+        assert saved["status"] == "running"
+        assert manager.is_active()
+        with pytest.raises(batch.BatchError, match="already running"):
+            manager.start(**options)
+    finally:
+        release_save.set()
+        assert worker_finished.wait(5.0)
+
+    assert not manager.is_active()
+    assert manager.active_id is None
+    saved = json.loads(manager.state_file.read_text(encoding="utf-8"))["jobs"][0]
+    assert saved["status"] == terminal_status
+    restored = batch.BatchManager(FakeExporter(), FakeService(), tmp_path / "config", log)
+    assert restored.get(started["id"])["status"] == terminal_status
+
+
 def test_public_batch_snapshot_is_bounded_and_keeps_actionable_rows():
     items = [
         {"relative_path": f"song-{index}.feedpak", "status": "queued"}
