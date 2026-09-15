@@ -6,6 +6,9 @@
   source-based FeedBack runtime has no bundled FFmpeg. Batch and single-song
   controls now show the exact FFmpeg blocker and remain fail-closed until it is
   verified.
+- Replace decoded audio timestamps with the exact rendered sample timeline
+  before Vorbis encoding, preventing backward Ogg packet timestamps from some
+  otherwise valid source encoders in both the full mix and preview.
 - Support older Nightly local stem servers and managed servers with verified
   models, including intentionally skipped startup loading, without pinning a
   server version or requiring a server upgrade.

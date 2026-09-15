@@ -6,6 +6,7 @@ import hashlib
 import json
 import math
 import multiprocessing
+import shutil
 import subprocess
 import sys
 import time
@@ -20,6 +21,11 @@ import exporter
 from tests.publish_worker import publish_worker
 
 FFMPEG = _ffmpeg_cmd()
+FFPROBE = None
+if FFMPEG:
+    _ffprobe_name = "ffprobe.exe" if sys.platform == "win32" else "ffprobe"
+    _ffprobe_sibling = Path(FFMPEG).with_name(_ffprobe_name)
+    FFPROBE = str(_ffprobe_sibling) if _ffprobe_sibling.is_file() else shutil.which("ffprobe")
 
 def _run(args: list[str]) -> None:
     result = subprocess.run(args, capture_output=True, check=False)
@@ -99,6 +105,55 @@ def _tone_amplitude(audio: Path, frequency: float) -> float:
     re = sum(sample * math.cos(omega * i) for i, sample in enumerate(samples))
     im = sum(sample * math.sin(omega * i) for i, sample in enumerate(samples))
     return 2.0 * math.hypot(re, im) / len(samples)
+
+
+def _timestamp_regressions(audio: Path) -> dict[str, int]:
+    result = subprocess.run([
+        FFPROBE, "-v", "error", "-select_streams", "a:0", "-show_packets",
+        "-show_entries", "packet=pts,dts", "-of", "json", str(audio),
+    ], capture_output=True, check=False)
+    assert result.returncode == 0, result.stderr.decode("utf-8", "replace")
+    packets = json.loads(result.stdout)["packets"]
+    regressions = {}
+    for field in ("pts", "dts"):
+        values = [int(packet[field]) for packet in packets if field in packet]
+        regressions[field] = sum(
+            value <= previous
+            for previous, value in zip(values, values[1:], strict=False)
+        )
+    return regressions
+
+
+def test_render_graphs_replace_decoder_timestamps_before_vorbis_encoding(
+        tmp_path, monkeypatch):
+    commands = []
+
+    def capture(command, outputs, **_kwargs):
+        commands.append((command, outputs))
+
+    monkeypatch.setattr(exporter, "_run_ogg_command", capture)
+    full = tmp_path / "full.ogg"
+    guitar = tmp_path / "guitar.flac"
+
+    exporter._render_mix("ffmpeg", full, [guitar], tmp_path / "mix.ogg")
+    mix_graph = commands[-1][0][commands[-1][0].index("-filter_complex") + 1]
+    assert "amix=inputs=2:duration=first:dropout_transition=0:normalize=0[mixed]" in mix_graph
+    assert "[mixed]asetpts=N/SR/TB[out]" in mix_graph
+
+    assert exporter._render_mix_and_preview(
+        "ffmpeg", full, [guitar], tmp_path / "combined.ogg",
+        tmp_path / "preview.ogg", 120.0,
+    ) is True
+    combined_graph = commands[-1][0][commands[-1][0].index("-filter_complex") + 1]
+    assert "amix=inputs=2:duration=first:dropout_transition=0:normalize=0[mixedraw]" in combined_graph
+    assert "[mixedraw]asetpts=N/SR/TB[mixed]" in combined_graph
+    assert "atrim=start=30.000:duration=30.000,asetpts=N/SR/TB" in combined_graph
+
+    assert exporter._render_preview(
+        "ffmpeg", full, tmp_path / "fallback-preview.ogg", 120.0,
+    ) is True
+    preview_filter = commands[-1][0][commands[-1][0].index("-af") + 1]
+    assert preview_filter.startswith("asetpts=N/SR/TB,")
 
 
 def test_atomic_publish_retries_if_first_output_appears_during_publication(
@@ -270,6 +325,9 @@ def test_export_removes_selected_audio_preserves_assets_and_never_mutates_source
     preview_high = _tone_amplitude(rendered_preview, 440)
     assert preview_low > 0.01
     assert preview_high < preview_low / 6.0
+    if FFPROBE:
+        assert _timestamp_regressions(rendered) == {"pts": 0, "dts": 0}
+        assert _timestamp_regressions(rendered_preview) == {"pts": 0, "dts": 0}
 
     # A second export chooses a new name; it never asks whether overwriting is OK.
     second = exporter.export_minus_mix(source, out_dir, ["guitar"])

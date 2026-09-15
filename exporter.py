@@ -374,10 +374,11 @@ def _render_mix(ffmpeg: str, full_mix: Path, excluded: list[Path], output: Path,
         filters.append(f"[{index}:a]volume=-1:precision=double[{label}]")
         negative_labels.append(f"[{label}]")
     inputs = "[0:a]" + "".join(negative_labels)
-    filters.append(
+    filters.extend([
         f"{inputs}amix=inputs={1 + len(excluded)}:duration=first:"
-        "dropout_transition=0:normalize=0[out]"
-    )
+        "dropout_transition=0:normalize=0[mixed]",
+        "[mixed]asetpts=N/SR/TB[out]",
+    ])
     cmd.extend([
         "-filter_complex", ";".join(filters),
         "-map", "[out]", "-vn", "-sn", "-dn", "-map_metadata", "-1",
@@ -401,7 +402,10 @@ def _render_preview(ffmpeg: str, mix: Path, output: Path, duration_value,
     cmd = [
         ffmpeg, "-hide_banner", "-nostdin", "-y", "-ss", f"{start:.3f}",
         "-i", str(mix), "-t", f"{clip:.3f}",
-        "-af", f"afade=t=in:st=0:d={fade:.3f},afade=t=out:st={fade_out:.3f}:d={fade:.3f}",
+        "-af", (
+            f"asetpts=N/SR/TB,afade=t=in:st=0:d={fade:.3f},"
+            f"afade=t=out:st={fade_out:.3f}:d={fade:.3f}"
+        ),
         "-vn", "-sn", "-dn", "-map_metadata", "-1",
         "-c:a", "libvorbis", "-q:a", "3", str(output),
     ]
@@ -526,12 +530,13 @@ def _render_mix_and_preview(ffmpeg: str, full_mix: Path, excluded: list[Path],
     filters.extend([
         (
             f"{inputs}amix=inputs={1 + len(excluded)}:duration=first:"
-            "dropout_transition=0:normalize=0[mixed]"
+            "dropout_transition=0:normalize=0[mixedraw]"
         ),
+        "[mixedraw]asetpts=N/SR/TB[mixed]",
         "[mixed]asplit=2[fullout][previewbase]",
         (
             f"[previewbase]atrim=start={start:.3f}:duration={clip:.3f},"
-            f"asetpts=PTS-STARTPTS,afade=t=in:st=0:d={fade:.3f},"
+            f"asetpts=N/SR/TB,afade=t=in:st=0:d={fade:.3f},"
             f"afade=t=out:st={fade_out:.3f}:d={fade:.3f}[previewout]"
         ),
     ])
