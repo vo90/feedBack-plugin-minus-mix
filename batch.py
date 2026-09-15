@@ -375,10 +375,11 @@ def scan_sources(exporter, input_dir: str, output_dir: str, excluded_stems,
 class BatchManager:
     """One persisted, sequential conversion queue per app process."""
 
-    def __init__(self, exporter, separator, config_dir: Path, log):
+    def __init__(self, exporter, separator, config_dir: Path, log, ffmpeg_resolver=None):
         self.exporter = exporter
         self.separator = separator
         self.log = log
+        self.ffmpeg_resolver = ffmpeg_resolver
         self.state_file = Path(config_dir) / "minus_mix_batch_jobs.json"
         self.lock = threading.RLock()
         self.persist_lock = threading.Lock()
@@ -1068,10 +1069,16 @@ class BatchManager:
             provider = BatchStemProvider(
                 self.separator, lambda: self._checkpoint(context), progress, separation_state,
             )
+            export_options = {
+                "stem_provider": provider,
+                "progress_cb": progress,
+                "cancel_cb": lambda: self._checkpoint(context),
+                "log": self.log,
+            }
+            if self.ffmpeg_resolver is not None:
+                export_options["ffmpeg_resolver"] = self.ffmpeg_resolver
             result = self.exporter.export_minus_mix(
-                source, output_dir, context.selected,
-                stem_provider=provider, progress_cb=progress,
-                cancel_cb=lambda: self._checkpoint(context), log=self.log,
+                source, output_dir, context.selected, **export_options,
             )
             with self.lock:
                 item = self.jobs[context.job_id]["items"][index]

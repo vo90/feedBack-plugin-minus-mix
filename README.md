@@ -157,7 +157,9 @@ before using MinusMix:
 1. Open **Settings** in FeedBack and find **Stem Splitter**.
 2. Find the **Local demucs server** section marked “recommended — start here.”
 3. On first use, select **Install server + models (~5 GB)** and wait for it to
-   finish. This is a one-time setup.
+   finish. This is a one-time setup. The managed installation also provides a
+   verified FFmpeg/FFprobe pair that MinusMix can use when a development build
+   of FeedBack does not include the desktop app's bundled FFmpeg.
 4. If it is already installed but stopped, select **Start server**.
 5. Open MinusMix. Its status should say that the local server is ready or that
    the model loads when needed. Status refreshes automatically while MinusMix
@@ -291,7 +293,7 @@ you cancel, and existing files are not overwritten.
 | The server is busy or updating | Leave the export running to continue automatically, or cancel. Later batch songs remain queued. |
 | Connection lost or separation interrupted | MinusMix reconnects to the same local server. If it stops with an action-needed message, check Stem Splitter and retry unfinished work. |
 | The selected model or instrument is unavailable | Install/select a suitable model in Stem Splitter. MinusMix does not silently substitute another model. |
-| **Create MinusMix FeedPak** is disabled | Select a song, at least one instrument, and an output folder. If separation is needed, resolve any missing-model or incompatible-server message. |
+| **Create MinusMix FeedPak** or **Start batch** is disabled | Read the summary beside the button. Select the required song/folders and instrument. Resolve any model/server message. If it reports FFmpeg unavailable, install or update Stem Splitter's managed server, or repair the FeedBack desktop app. |
 | MinusMix cannot write to the output folder | Choose another existing folder that your user account can write to, such as a folder inside Documents. |
 | A song is not listed | Make sure it is a local `.feedpak` or `.sloppak`, then select **Refresh** beside the song search. |
 | Some instrument sound remains | AI separation is an estimate. Bleed is more likely when instruments overlap heavily in the original recording. |
@@ -376,6 +378,10 @@ is discouraged because each generation includes another lossy audio encode.
 - Verifies output-folder writability before separation or rendering begins.
 - Accepts output-folder writes only from a loopback client.
 - Sends separation requests only to Stem Splitter's managed loopback server.
+- Uses FeedBack's bundled FFmpeg when present. Otherwise it accepts only the
+  active Stem Splitter generation's contained canonical FFmpeg/FFprobe pair
+  after checking its owner, manifest binding, platform, sizes and SHA-256
+  receipts; it never adds that directory to global `PATH`.
 - Uses the desktop shell's native directory chooser.
 
 ### Compatibility and server scope

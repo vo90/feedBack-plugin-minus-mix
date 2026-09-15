@@ -135,10 +135,15 @@
   var BATCH_POLL_MS = 2000;
   var BACKGROUND_POLL_MS = 15000;
   var POLL_RETRY_MAX_MS = 30000;
+  var FFMPEG_CHECKING_REASON = 'Checking for a verified FFmpeg installation…';
+  var FFMPEG_UNAVAILABLE_REASON = 'FFmpeg is unavailable. Install or update '
+    + 'Stem Splitter\'s managed server, or repair the desktop app.';
   var fb = window.feedBack;
   var state = {
     inited: false, busy: false, selectedFilename: '', selectedLabel: '',
-    sourceInfo: null, searchTimer: null, sourceRequestId: 0, ffmpegAvailable: true,
+    sourceInfo: null, searchTimer: null, sourceRequestId: 0,
+    ffmpegAvailable: false, ffmpegSource: 'checking', ffmpegReason: FFMPEG_CHECKING_REASON,
+    ffmpegErrorVisible: false,
     statusRetryTimer: null, statusLoading: false,
     singleJobId: '', singlePollTimer: null, singleNotifiedId: '', singleStage: '',
     singleDetail: '', singleStatusRequestId: 0, singleMutationPending: false,
@@ -196,6 +201,19 @@
     if (!node) return;
     node.className = 'pmx-status ' + kind;
     node.textContent = text || '';
+  }
+  function updateFfmpegState(status) {
+    var available = !!(status && status.ffmpeg_available === true);
+    var source = status && typeof status.ffmpeg_source === 'string'
+      ? status.ffmpeg_source.trim() : '';
+    var reason = status && typeof status.ffmpeg_reason === 'string'
+      ? status.ffmpeg_reason.trim() : '';
+    state.ffmpegAvailable = available;
+    state.ffmpegSource = source || (available ? 'unknown' : 'unavailable');
+    state.ffmpegReason = reason || (available ? 'FFmpeg is ready.' : FFMPEG_UNAVAILABLE_REASON);
+  }
+  function ffmpegUnavailableReason() {
+    return state.ffmpegReason || FFMPEG_UNAVAILABLE_REASON;
   }
   function selectedStems() {
     return Array.prototype.slice.call(document.querySelectorAll('#pmx-stems input[type=checkbox]:checked'))
@@ -368,6 +386,9 @@
       if (needsSeparation && state.separation.waitable && !state.separation.ready) {
         detail.textContent += ' • waits for the server and continues automatically';
       }
+    } else if (!state.ffmpegAvailable) {
+      title.textContent = 'FFmpeg is unavailable';
+      detail.textContent = ffmpegUnavailableReason();
     } else if (needsSeparation && !engineOkay) {
       title.textContent = 'Temporary separation needs attention';
       detail.textContent = admission.reason;
@@ -750,6 +771,9 @@
     } else if (state.batchBusy) {
       title.textContent = 'Scanning folder…';
       detail.textContent = 'Reading feedpak manifests without changing any files.';
+    } else if (currentScan && !state.ffmpegAvailable) {
+      title.textContent = 'FFmpeg is unavailable';
+      detail.textContent = ffmpegUnavailableReason();
     } else if (currentScan) {
       var counts = state.batchScan.counts || {};
       title.textContent = (counts.ready || 0) + ' feedpak' + (counts.ready === 1 ? '' : 's') + ' ready';
@@ -1139,6 +1163,11 @@
   function startBatch() {
     if (state.busy || state.batchBusy || state.batchActive || !state.batchScan
         || state.batchScanKey !== batchOptionsKey()) return;
+    if (!state.ffmpegAvailable) {
+      showBatchStatus('error', ffmpegUnavailableReason());
+      updateBatchReady();
+      return;
+    }
     var admission = separationAdmission(!!(state.batchScan.counts || {}).needs_separation,
       state.separation, batchRequiredStems(state.batchScan));
     if (!admission.allowed) { showBatchStatus('error', admission.reason); return; }
@@ -1192,6 +1221,11 @@
     if (state.busy || state.batchActive) return;
     var stems = selectedStems();
     if (!state.selectedFilename || !stems.length || !outputFolder()) return;
+    if (!state.ffmpegAvailable) {
+      showStatus('error', ffmpegUnavailableReason());
+      updateReady();
+      return;
+    }
     var admission = separationAdmission(selectionNeedsSeparation(stems), state.separation,
       selectionRequiredStems(stems));
     if (!admission.allowed) { showStatus('error', admission.reason); return; }
@@ -1228,15 +1262,28 @@
     state.statusLoading = true;
     if ($('pmx-engine-refresh')) $('pmx-engine-refresh').disabled = true;
     return apiClient.status().then(function (status) {
-      state.ffmpegAvailable = !!status.ffmpeg_available;
+      updateFfmpegState(status);
       state.separation = status.separation || state.separation;
       renderEngineStatus();
       updateReady();
       updateBatchReady();
-      if (!status.ffmpeg_available) {
-        showStatus('error', 'FFmpeg is unavailable; repair or reinstall the desktop app before exporting.');
+      if (!state.ffmpegAvailable) {
+        state.ffmpegErrorVisible = true;
+        showStatus('error', ffmpegUnavailableReason());
+      } else if (state.ffmpegErrorVisible) {
+        state.ffmpegErrorVisible = false;
+        showStatus('', '');
       }
     }).catch(function (error) {
+      updateFfmpegState({
+        ffmpeg_available: false,
+        ffmpeg_source: 'unavailable',
+        ffmpeg_reason: 'Could not verify FFmpeg availability — ' + error.message,
+      });
+      state.ffmpegErrorVisible = true;
+      updateReady();
+      updateBatchReady();
+      showStatus('error', ffmpegUnavailableReason());
       var text = $('pmx-engine-text');
       if (text) {
         text.textContent = 'Could not refresh the managed local Stem Splitter server status — '

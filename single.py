@@ -95,10 +95,11 @@ class SeparatorStemProvider:
 class SingleExportManager:
     """Run at most one single-song export at a time per app process."""
 
-    def __init__(self, exporter, separator, log):
+    def __init__(self, exporter, separator, log, ffmpeg_resolver=None):
         self.exporter = exporter
         self.separator = separator
         self.log = log
+        self.ffmpeg_resolver = ffmpeg_resolver
         self.lock = threading.RLock()
         self.jobs: dict[str, SingleJob] = {}
         self.cancel_events: dict[str, threading.Event] = {}
@@ -267,6 +268,8 @@ class SingleExportManager:
                 "stem_provider": stem_provider,
                 "progress_cb": progress, "cancel_cb": checkpoint, "log": self.log,
             }
+            if self.ffmpeg_resolver is not None:
+                export_options["ffmpeg_resolver"] = self.ffmpeg_resolver
             if prepared_source is not None:
                 export_options["prepared_source"] = prepared_source
             result = self.exporter.export_minus_mix(

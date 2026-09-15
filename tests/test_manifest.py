@@ -62,6 +62,15 @@ def test_release_archive_contains_the_license(tmp_path):
     assert archived_license.replace("\r\n", "\n") == license_text.replace("\r\n", "\n")
 
 
+def test_release_archive_contains_the_managed_ffmpeg_resolver(tmp_path):
+    root = Path(__file__).resolve().parents[1]
+
+    with zipfile.ZipFile(build_release(root, tmp_path)) as archive:
+        archived_resolver = archive.read("minus_mix/media_tools.py")
+
+    assert archived_resolver == (root / "media_tools.py").read_bytes()
+
+
 def test_frontend_sources_do_not_contain_known_mojibake():
     root = Path(__file__).resolve().parents[1]
     script = (root / "screen.js").read_text(encoding="utf-8")

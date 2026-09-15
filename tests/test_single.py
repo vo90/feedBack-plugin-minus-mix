@@ -67,6 +67,36 @@ def test_single_export_runs_in_background_and_publishes_result(tmp_path):
     assert manager.is_active() is False
 
 
+def test_single_export_passes_injected_ffmpeg_resolver_to_exporter(tmp_path):
+    source = tmp_path / "song.feedpak"
+    source.write_bytes(b"source")
+    received = []
+
+    def managed_resolver():
+        return "C:/verified-tools/ffmpeg.exe"
+
+    class ResolverExporter(CompletingExporter):
+        @staticmethod
+        def export_minus_mix(source, output_dir, selected, *, stem_provider,
+                             ffmpeg_resolver, progress_cb, cancel_cb, log):
+            received.append(ffmpeg_resolver)
+            assert ffmpeg_resolver() == "C:/verified-tools/ffmpeg.exe"
+            return CompletingExporter.export_minus_mix(
+                source, output_dir, selected, stem_provider=stem_provider,
+                progress_cb=progress_cb, cancel_cb=cancel_cb, log=log,
+            )
+
+    manager = single.SingleExportManager(
+        ResolverExporter(), SimpleNamespace(status=lambda: {"ready": False}), _log(),
+        ffmpeg_resolver=managed_resolver,
+    )
+
+    completed = _wait(manager, manager.start(source, tmp_path, ["guitar"])["id"])
+
+    assert completed["status"] == "completed"
+    assert received == [managed_resolver]
+
+
 def test_single_export_reuses_its_unchanged_prepared_source(tmp_path):
     source = tmp_path / "song.feedpak"
     source.write_bytes(b"source")

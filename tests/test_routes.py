@@ -14,11 +14,41 @@ import separator_client
 import single
 
 
+class FakeFFmpegResolver:
+    """Deterministic setup seam: route tests never depend on host FFmpeg."""
+
+    path = "C:/verified-tools/ffmpeg.exe"
+
+    def __init__(self, config_dir, host_resolver):
+        self.config_dir = config_dir
+        self.host_resolver = host_resolver
+
+    def resolve(self):
+        return self.path
+
+    def require_verified(self):
+        if self.path is None:
+            raise RuntimeError("No verified FFmpeg is available for MinusMix.")
+        return self.path
+
+    def public_status(self):
+        available = self.path is not None
+        return {
+            "available": available,
+            "source": "test" if available else "unavailable",
+            "reason": (
+                "Verified test FFmpeg is ready."
+                if available else "No verified FFmpeg is available for MinusMix."
+            ),
+            "generation_id": "test-generation" if available else None,
+        }
+
+
 def _request(host: str) -> Request:
     return Request({"type": "http", "client": (host, 12345), "headers": []})
 
 
-def _app(tmp_path, *, meta_db=None) -> FastAPI:
+def _app(tmp_path, *, meta_db=None, ffmpeg_path="C:/verified-tools/ffmpeg.exe") -> FastAPI:
     log = SimpleNamespace(
         info=lambda *args, **kwargs: None,
         warning=lambda *args, **kwargs: None,
@@ -27,9 +57,11 @@ def _app(tmp_path, *, meta_db=None) -> FastAPI:
     modules = {
         "batch": batch,
         "exporter": exporter,
+        "media_tools": SimpleNamespace(FFmpegResolver=FakeFFmpegResolver),
         "separator_client": separator_client,
         "single": single,
     }
+    FakeFFmpegResolver.path = ffmpeg_path
     app = FastAPI()
     routes.setup(app, {
         "config_dir": str(tmp_path),
@@ -38,6 +70,35 @@ def _app(tmp_path, *, meta_db=None) -> FastAPI:
         "meta_db": meta_db,
     })
     return app
+
+
+def _endpoint(app: FastAPI, path: str):
+    return next(
+        route.endpoint for route in app.routes
+        if getattr(route, "path", None) == path
+    )
+
+
+def test_setup_uses_supplied_available_ffmpeg_resolver_for_status(tmp_path):
+    endpoint = _endpoint(_app(tmp_path), f"{routes.API}/status")
+
+    result = endpoint()
+
+    assert result["ffmpeg_available"] is True
+    assert result["ffmpeg_source"] == "test"
+    assert result["ffmpeg_reason"] == "Verified test FFmpeg is ready."
+
+
+def test_batch_start_fails_closed_when_supplied_resolver_is_unavailable(tmp_path):
+    endpoint = _endpoint(
+        _app(tmp_path, ffmpeg_path=None), f"{routes.API}/batch/start",
+    )
+
+    with pytest.raises(HTTPException) as raised:
+        endpoint(body={}, request=_request("127.0.0.1"))
+
+    assert raised.value.status_code == 409
+    assert raised.value.detail == "No verified FFmpeg is available for MinusMix."
 
 
 def test_sources_filters_feedpaks_in_metadata_query(tmp_path):

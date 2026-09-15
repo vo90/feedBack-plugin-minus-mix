@@ -107,7 +107,10 @@ def transport(tmp_path, monkeypatch, clock):
     client = client_module.SeparationClient(tmp_path, _log(), script)
     # Unit fixtures target transport and use recognizable synthetic audio bytes;
     # production validation is covered by test_separator_http_compat.py.
-    monkeypatch.setattr(client_module, "_validate_audio", lambda path, _cancel=None: path.read_bytes().startswith(b"audio:"))
+    monkeypatch.setattr(
+        client_module, "_validate_audio",
+        lambda path, _cancel=None, _resolver=None: path.read_bytes().startswith(b"audio:"),
+    )
     return client, script, mix, tmp_path / "work"
 
 

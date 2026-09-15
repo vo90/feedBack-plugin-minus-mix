@@ -9,12 +9,17 @@ import pytest
 
 import separator_client
 
+_REAL_VALIDATE_AUDIO = separator_client._validate_audio
+
 
 @pytest.fixture(autouse=True)
 def fake_audio_validation(monkeypatch):
     # These legacy transport fixtures intentionally use tiny arbitrary byte strings.
     # The separate real HTTP fixture exercises production FFmpeg validation.
-    monkeypatch.setattr(separator_client, "_validate_audio", lambda path, _cancel=None: bool(path.stat().st_size))
+    monkeypatch.setattr(
+        separator_client, "_validate_audio",
+        lambda path, _cancel=None, _resolver=None: bool(path.stat().st_size),
+    )
 
 
 class FakeResponse:
@@ -89,6 +94,52 @@ def _write_config(root: Path, *, port=7865, model="bs_roformer_sw", live_state=T
             "pid": 1234,
             "port": port,
         }), encoding="utf-8")
+
+
+def test_audio_validation_uses_injected_ffmpeg_resolver(monkeypatch, tmp_path):
+    import audio
+
+    media = tmp_path / "stem.flac"
+    media.write_bytes(b"downloaded audio")
+    commands = []
+    resolver_calls = []
+
+    def managed_resolver():
+        resolver_calls.append(True)
+        return "C:/verified-tools/ffmpeg.exe"
+
+    class FinishedProcess:
+        returncode = 0
+
+        @staticmethod
+        def poll():
+            return 0
+
+        @staticmethod
+        def wait():
+            return 0
+
+        @staticmethod
+        def kill():
+            raise AssertionError("completed validator must not be killed")
+
+    def fake_popen(command, *, stdout, stderr, **kwargs):
+        del kwargs
+        assert stderr is stdout
+        stdout.write(b"out_time_us=1000\n")
+        stdout.flush()
+        commands.append(command)
+        return FinishedProcess()
+
+    monkeypatch.setattr(
+        audio, "_ffmpeg_cmd",
+        lambda: (_ for _ in ()).throw(AssertionError("host FFmpeg lookup used")),
+    )
+    monkeypatch.setattr(separator_client.subprocess, "Popen", fake_popen)
+
+    assert _REAL_VALIDATE_AUDIO(media, ffmpeg_resolver=managed_resolver) is True
+    assert resolver_calls == [True]
+    assert commands[0][0] == "C:/verified-tools/ffmpeg.exe"
 
 
 def test_status_discovers_current_stem_splitter_state_without_importing_plugin(tmp_path):
@@ -218,6 +269,42 @@ def test_direct_cached_response_streams_only_requested_stem_without_deleting_sha
     assert not any("vocals.flac" in call[1] for call in requests.calls)
     assert not any(call[0] == "DELETE" for call in requests.calls)
     assert all(response.closed for response in (health, accepted, downloaded))
+
+
+def test_separation_client_forwards_injected_ffmpeg_resolver_to_download_validation(
+        tmp_path, monkeypatch):
+    _write_config(tmp_path)
+    requests = FakeRequests()
+    requests.get_responses.extend([
+        FakeResponse(payload={"status": "ok", "warmup": {"bs_roformer_sw": "ready"}}),
+        FakeResponse(chunks=[b"guitar-audio"]),
+    ])
+    requests.post_responses.append(FakeResponse(payload={
+        "job_id": "managed-ffmpeg-job",
+        "stems": {"guitar": "/download/managed-ffmpeg-job/guitar.flac"},
+        "cached": True,
+    }))
+    mix = tmp_path / "full.ogg"
+    mix.write_bytes(b"mix")
+    received = []
+
+    def managed_resolver():
+        return "C:/verified-tools/ffmpeg.exe"
+
+    def validate(path, cancel_cb=None, ffmpeg_resolver=None):
+        del cancel_cb
+        received.append((path.name, ffmpeg_resolver))
+        return bool(path.stat().st_size)
+
+    monkeypatch.setattr(separator_client, "_validate_audio", validate)
+    client = separator_client.SeparationClient(
+        tmp_path, _log(), requests, ffmpeg_resolver=managed_resolver,
+    )
+
+    result = client.separate(mix, tmp_path / "work", ("guitar",))
+
+    assert result["guitar"].read_bytes() == b"guitar-audio"
+    assert received == [("guitar.flac.part", managed_resolver)]
 
 
 def test_async_current_nightly_job_is_polled_and_progress_is_reported(tmp_path, monkeypatch):

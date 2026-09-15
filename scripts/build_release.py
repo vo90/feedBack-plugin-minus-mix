@@ -14,6 +14,7 @@ PLUGIN_FILES = (
     "README.md",
     "batch.py",
     "exporter.py",
+    "media_tools.py",
     "plugin.json",
     "routes.py",
     "reuse_batch.py",

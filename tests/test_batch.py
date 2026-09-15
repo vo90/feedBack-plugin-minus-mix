@@ -204,6 +204,46 @@ def test_recursive_scan_and_batch_can_flatten_outputs_with_numbered_collisions(t
     assert resumed["counts"]["skipped_existing"] == 2
 
 
+def test_batch_passes_injected_ffmpeg_resolver_to_each_export(tmp_path):
+    source_root = tmp_path / "sources"
+    output_root = tmp_path / "outputs"
+    output_root.mkdir()
+    _pak(source_root / "song.feedpak", guitar=True)
+    received = []
+
+    def managed_resolver():
+        return "C:/verified-tools/ffmpeg.exe"
+
+    class ResolverExporter(FakeExporter):
+        @staticmethod
+        def export_minus_mix(source, output_dir, selected, *, stem_provider,
+                             ffmpeg_resolver, progress_cb, cancel_cb, log):
+            received.append(ffmpeg_resolver)
+            assert ffmpeg_resolver() == "C:/verified-tools/ffmpeg.exe"
+            return FakeExporter.export_minus_mix(
+                source, output_dir, selected, stem_provider=stem_provider,
+                progress_cb=progress_cb, cancel_cb=cancel_cb, log=log,
+            )
+
+    manager = batch.BatchManager(
+        ResolverExporter(), FakeService(), tmp_path / "config",
+        SimpleNamespace(
+            exception=lambda *args, **kwargs: None,
+            warning=lambda *args, **kwargs: None,
+        ),
+        ffmpeg_resolver=managed_resolver,
+    )
+
+    completed = _wait(manager, manager.start(
+        input_dir=str(source_root), output_dir=str(output_root),
+        excluded_stems=["guitar"], recursive=True,
+        skip_existing=True, skip_derived=True,
+    )["id"])
+
+    assert completed["status"] == "completed"
+    assert received == [managed_resolver]
+
+
 def test_batch_releases_each_temporary_separation_before_the_next_item(tmp_path):
     source_root = tmp_path / "sources"
     output_root = tmp_path / "outputs"

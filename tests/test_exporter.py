@@ -194,6 +194,36 @@ def test_export_rejects_unwritable_destination_before_audio_work(tmp_path, monke
     assert list(output_dir.iterdir()) == []
 
 
+def test_export_uses_injected_ffmpeg_resolver_instead_of_host_lookup(
+        tmp_path, monkeypatch):
+    source = tmp_path / "song.feedpak"
+    with zipfile.ZipFile(source, "w") as archive:
+        archive.writestr("manifest.yaml", yaml.safe_dump({
+            "title": "Song",
+            "stems": [{"id": "full", "file": "stems/full.ogg"}],
+        }))
+        archive.writestr("stems/full.ogg", b"not decoded in this test")
+    output_dir = tmp_path / "exports"
+    output_dir.mkdir()
+    calls = []
+
+    def managed_resolver():
+        calls.append("resolve")
+        return "C:/verified-tools/ffmpeg.exe"
+
+    monkeypatch.setattr(
+        exporter, "_ffmpeg_cmd",
+        lambda: (_ for _ in ()).throw(AssertionError("host FFmpeg lookup used")),
+    )
+
+    with pytest.raises(exporter.ExportError, match="at least one"):
+        exporter.export_minus_mix(
+            source, output_dir, ["full"], ffmpeg_resolver=managed_resolver,
+        )
+
+    assert calls == ["resolve"]
+
+
 @pytest.mark.skipif(not FFMPEG, reason="ffmpeg is required for a real-audio export")
 def test_export_removes_selected_audio_preserves_assets_and_never_mutates_source(tmp_path):
     source = _make_source(tmp_path)

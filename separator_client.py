@@ -269,12 +269,16 @@ def _temp_volume_free_bytes(work_dir: Path) -> int | None:
             return None
 
 
-def _validate_audio(path: Path, cancel_cb: CancelCallback = None) -> bool:
-    """Decode with the host's existing FFmpeg; no ML/runtime dependency imports."""
+def _validate_audio(path: Path, cancel_cb: CancelCallback = None,
+                    ffmpeg_resolver: Callable[[], str | None] | None = None) -> bool:
+    """Decode with the injected verified FFmpeg; import no ML/runtime dependencies."""
     from audio import _ffmpeg_cmd
-    ffmpeg = _ffmpeg_cmd()
+    ffmpeg = ffmpeg_resolver() if ffmpeg_resolver is not None else _ffmpeg_cmd()
     if not ffmpeg:
-        raise SeparationServiceBlocked("FFmpeg is unavailable; repair the game installation")
+        raise SeparationServiceBlocked(
+            "FFmpeg is unavailable; install or update Stem Splitter's managed server, "
+            "or repair the desktop app"
+        )
     flags = {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)} if os.name == "nt" else {}
     with tempfile.TemporaryFile() as output:
         proc = subprocess.Popen(
@@ -378,10 +382,11 @@ class SeparationClient:
     """Public local HTTP client with request-scoped update/restart recovery."""
     supports_state_callback = True
 
-    def __init__(self, config_dir: Path, log, requests_module=None):
+    def __init__(self, config_dir: Path, log, requests_module=None, ffmpeg_resolver=None):
         self.config_dir = Path(config_dir)
         self.log = log
         self._requests_module = requests_module
+        self.ffmpeg_resolver = ffmpeg_resolver
         self._resolve_lock = threading.Lock()
         self._resolve_cache = None
 
@@ -813,7 +818,9 @@ class SeparationClient:
                     ctx.waiting("Stem download was interrupted; restarting this file from byte zero", since=started)
                     self._recover(ctx, "Waiting to resume the original stem download", retry_after=BUSY_BASE_BACKOFF, retrieval=True)
                     continue
-                if not partial.stat().st_size or not _validate_audio(partial, ctx.check):
+                if not partial.stat().st_size or not _validate_audio(
+                    partial, ctx.check, self.ffmpeg_resolver,
+                ):
                     return False
                 ctx.check()
                 os.replace(partial, destination)

@@ -38,7 +38,9 @@ function environment() {
   const events = {}, timers = new Map(), calls = [], notifications = [];
   let nextTimer = 0;
   const payloads = {
-    '/status': { ffmpeg_available: true, separation: { ready: false, state: 'unavailable', reason: 'Install the server.' } },
+    '/status': { ffmpeg_available: true, ffmpeg_source: 'desktop',
+      ffmpeg_reason: "FeedBack's bundled FFmpeg is ready.",
+      separation: { ready: false, state: 'unavailable', reason: 'Install the server.' } },
     '/export/latest': { job: null }, '/batch/latest': { job: null },
   };
   const document = {
@@ -79,6 +81,9 @@ ${marker}`);
   vm.runInNewContext(source, context, { filename: 'screen.js' });
   const ui = window.testUI;
   ui.state.inited = true;
+  ui.state.ffmpegAvailable = true;
+  ui.state.ffmpegSource = 'desktop';
+  ui.state.ffmpegReason = "FeedBack's bundled FFmpeg is ready.";
   ui.state.selectedFilename = 'original.feedpak';
   ui.state.sourceInfo = { stems: [{ id: 'guitar', requires_separation: true }] };
   nodes['pmx-output'].value = 'C:/output';
@@ -265,6 +270,60 @@ async function refreshChecks() {
     'Navigating away and back restores status without creating duplicate jobs');
 }
 
+async function ffmpegReadinessChecks() {
+  const env = environment();
+  env.ui.state.separation = { ready: true, state: 'ready', reason: 'Model is ready.' };
+  setScan(env);
+  env.payloads['/status'] = {
+    ffmpeg_available: false,
+    ffmpeg_source: 'unavailable',
+    ffmpeg_reason: "Stem Splitter's active managed runtime is not verified.",
+    separation: env.ui.state.separation,
+  };
+
+  await env.ui.refreshStatus();
+  assert.equal(env.ui.state.ffmpegAvailable, false);
+  assert.equal(env.ui.state.ffmpegSource, 'unavailable');
+  assert.equal(env.ui.state.ffmpegReason, "Stem Splitter's active managed runtime is not verified.");
+  assert.equal(node(env, 'export').disabled, true);
+  assert.equal(node(env, 'batch-start').disabled, true);
+  assert.match(node(env, 'summary-title').textContent, /FFmpeg is unavailable/);
+  assert.match(node(env, 'batch-summary-title').textContent, /FFmpeg is unavailable/);
+  assert.match(node(env, 'batch-summary-detail').textContent, /managed runtime is not verified/);
+
+  const postsBefore = env.calls.filter(call => call.options?.method === 'POST').length;
+  env.ui.createExport();
+  env.ui.startBatch();
+  await tick();
+  assert.equal(env.calls.filter(call => call.options?.method === 'POST').length, postsBefore,
+    'Unavailable FFmpeg cannot submit through stale single or batch clicks');
+  assert.match(node(env, 'status').textContent, /managed runtime is not verified/);
+  assert.match(node(env, 'batch-status').textContent, /managed runtime is not verified/);
+
+  env.payloads['/status'] = {
+    ffmpeg_available: true,
+    ffmpeg_source: 'stem_splitter_managed',
+    ffmpeg_reason: "Stem Splitter's verified managed FFmpeg is ready.",
+    separation: env.ui.state.separation,
+  };
+  await env.ui.refreshStatus();
+  assert.equal(env.ui.state.ffmpegAvailable, true);
+  assert.equal(env.ui.state.ffmpegSource, 'stem_splitter_managed');
+  assert.equal(node(env, 'export').disabled, false);
+  assert.equal(node(env, 'batch-start').disabled, false);
+  assert.match(node(env, 'batch-summary-title').textContent, /3 feedpaks ready/);
+  assert.equal(node(env, 'status').textContent, '', 'The stale FFmpeg error clears after recovery');
+
+  env.payloads['/status'] = () => { throw new Error('status endpoint offline'); };
+  await env.ui.refreshStatus();
+  assert.equal(env.ui.state.ffmpegAvailable, false, 'A status failure cannot retain stale availability');
+  assert.equal(env.ui.state.ffmpegSource, 'unavailable');
+  assert.equal(node(env, 'export').disabled, true);
+  assert.equal(node(env, 'batch-start').disabled, true);
+  assert.match(node(env, 'batch-summary-detail').textContent,
+    /Could not verify FFmpeg availability.*status endpoint offline/);
+}
+
 async function restoreRaceChecks() {
   for (const batch of [false, true]) {
     const env = environment(); env.ui.state.separation = waitingEngine; setScan(env);
@@ -349,6 +408,6 @@ function completedRecoveryChecks() {
 
 (async () => {
   await admissionChecks(); await singleChecks(); await batchChecks(); await refreshChecks();
-  await restoreRaceChecks(); completedRecoveryChecks();
+  await ffmpegReadinessChecks(); await restoreRaceChecks(); completedRecoveryChecks();
   console.log('Main UI admission, waiting, cancellation, blocked queues, restore and refresh passed.');
 })().catch(error => { console.error(error); process.exitCode = 1; });

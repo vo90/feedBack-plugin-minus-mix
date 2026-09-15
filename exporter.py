@@ -860,6 +860,7 @@ def export_minus_mix(source: Path, output_dir: Path, excluded_stems: Iterable[st
                      prepared_source: PreparedSource | None = None,
                      stem_provider: StemProvider | None = None,
                      separate_missing: TemporarySeparator | None = None,
+                     ffmpeg_resolver: Callable[[], str | None] | None = None,
                      progress_cb: ProgressCallback | None = None,
                      cancel_cb: CancelCallback | None = None,
                      log=None) -> ExportResult:
@@ -878,9 +879,12 @@ def export_minus_mix(source: Path, output_dir: Path, excluded_stems: Iterable[st
             raise ExportError("the output folder cannot be inside a directory-form source feedpak")
     output_dir = validate_output_directory(output_dir)
 
-    ffmpeg = _ffmpeg_cmd()
+    ffmpeg = ffmpeg_resolver() if ffmpeg_resolver is not None else _ffmpeg_cmd()
     if not ffmpeg:
-        raise ExportError("ffmpeg is not available; repair or reinstall the desktop app")
+        raise ExportError(
+            "ffmpeg is unavailable; install or update Stem Splitter's managed server, "
+            "or repair the desktop app"
+        )
 
     prepared = _resolve_prepared_source(source, prepared_source)
     selected = _selected_exclusions(excluded_stems)

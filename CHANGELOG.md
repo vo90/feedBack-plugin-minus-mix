@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Reuse Stem Splitter's active receipt-verified managed FFmpeg pair when a
+  source-based FeedBack runtime has no bundled FFmpeg. Batch and single-song
+  controls now show the exact FFmpeg blocker and remain fail-closed until it is
+  verified.
 - Support older Nightly local stem servers and managed servers with verified
   models, including intentionally skipped startup loading, without pinning a
   server version or requiring a server upgrade.
