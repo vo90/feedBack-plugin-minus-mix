@@ -6,6 +6,7 @@ import hashlib
 import json
 import math
 import multiprocessing
+import shutil
 import subprocess
 import sys
 import time
@@ -20,17 +21,22 @@ import exporter
 from tests.publish_worker import publish_worker
 
 FFMPEG = _ffmpeg_cmd()
+FFPROBE = None
+if FFMPEG:
+    _ffprobe_name = "ffprobe.exe" if sys.platform == "win32" else "ffprobe"
+    _ffprobe_sibling = Path(FFMPEG).with_name(_ffprobe_name)
+    FFPROBE = str(_ffprobe_sibling) if _ffprobe_sibling.is_file() else shutil.which("ffprobe")
 
 def _run(args: list[str]) -> None:
     result = subprocess.run(args, capture_output=True, check=False)
     assert result.returncode == 0, result.stderr.decode("utf-8", "replace")[-1000:]
 
 
-def _ogg_sine(path: Path, frequency: int, duration: float = 2.0) -> None:
+def _ogg_sine(path: Path, frequency: int, duration: float = 2.0, volume=1.0) -> None:
     _run([
         FFMPEG, "-hide_banner", "-nostdin", "-y",
         "-f", "lavfi", "-i", f"sine=frequency={frequency}:duration={duration}:sample_rate=44100",
-        "-c:a", "libvorbis", "-q:a", "7", str(path),
+        "-af", f"volume={volume}", "-c:a", "libvorbis", "-q:a", "7", str(path),
     ])
 
 
@@ -49,7 +55,11 @@ def _make_source(tmp_path: Path, *, unsafe_member: bool = False, include_guitar:
     guitar = tmp_path / "guitar.ogg"
     preview = tmp_path / "old-preview.ogg"
     _ogg_two_sines(full)
-    _ogg_sine(guitar, 440)
+    _ogg_sine(guitar, 440, volume=0.75)
+    bass = tmp_path / "bass.ogg"
+    silent = tmp_path / "silent.ogg"
+    _ogg_sine(bass, 110)
+    _ogg_sine(silent, 220, volume=0)
     _ogg_sine(preview, 440, duration=1.0)
     manifest = {
         "feedpak_version": "1.14.0",
@@ -57,7 +67,7 @@ def _make_source(tmp_path: Path, *, unsafe_member: bool = False, include_guitar:
         "artist": "Test Artist",
         "duration": 2.0,
         "arrangements": [{"id": "lead", "name": "Lead", "file": "arrangements/lead.json", "type": "guitar"}],
-        "stems": ([{"id": "guitar", "file": "stems/guitar.ogg", "default": True}]
+        "stems": ([{"id": stem, "file": f"stems/{stem}.ogg", "default": True} for stem in exporter.MIX_STEMS]
                   if include_guitar else []) + [
             {"id": "full", "file": "stems/full.ogg", "codec": "vorbis", "default": True},
         ],
@@ -73,7 +83,9 @@ def _make_source(tmp_path: Path, *, unsafe_member: bool = False, include_guitar:
         zf.writestr("cover.png", b"unchanged-cover-bytes")
         zf.write(full, "stems/full.ogg", compress_type=zipfile.ZIP_STORED)
         if include_guitar:
-            zf.write(guitar, "stems/guitar.ogg", compress_type=zipfile.ZIP_STORED)
+            for stem in exporter.MIX_STEMS:
+                audio = guitar if stem == "guitar" else bass if stem == "bass" else silent
+                zf.write(audio, f"stems/{stem}.ogg", compress_type=zipfile.ZIP_STORED)
         zf.write(preview, "preview.ogg", compress_type=zipfile.ZIP_STORED)
         if unsafe_member:
             zf.writestr("../outside.txt", b"must not be preserved")
@@ -99,6 +111,52 @@ def _tone_amplitude(audio: Path, frequency: float) -> float:
     re = sum(sample * math.cos(omega * i) for i, sample in enumerate(samples))
     im = sum(sample * math.sin(omega * i) for i, sample in enumerate(samples))
     return 2.0 * math.hypot(re, im) / len(samples)
+
+
+def _timestamp_regressions(audio: Path) -> dict[str, int]:
+    result = subprocess.run([
+        FFPROBE, "-v", "error", "-select_streams", "a:0", "-show_packets",
+        "-show_entries", "packet=pts,dts", "-of", "json", str(audio),
+    ], capture_output=True, check=False)
+    assert result.returncode == 0, result.stderr.decode("utf-8", "replace")
+    packets = json.loads(result.stdout)["packets"]
+    regressions = {}
+    for field in ("pts", "dts"):
+        values = [int(packet[field]) for packet in packets if field in packet]
+        regressions[field] = sum(
+            value <= previous
+            for previous, value in zip(values, values[1:], strict=False)
+        )
+    return regressions
+
+
+def test_render_graphs_replace_decoder_timestamps_before_vorbis_encoding(
+        tmp_path, monkeypatch):
+    commands = []
+
+    def capture(command, outputs, **_kwargs):
+        commands.append((command, outputs))
+
+    monkeypatch.setattr(exporter, "_run_ogg_command", capture)
+    full = tmp_path / "full.ogg"
+
+    exporter._render_mix("ffmpeg", full, tmp_path / "mix.ogg")
+    mix_graph = commands[-1][0][commands[-1][0].index("-af") + 1]
+    assert mix_graph.startswith("asetpts=N/SR/TB")
+
+    assert exporter._render_mix_and_preview(
+        "ffmpeg", full, tmp_path / "combined.ogg",
+        tmp_path / "preview.ogg", 120.0,
+    ) is True
+    combined_graph = commands[-1][0][commands[-1][0].index("-filter_complex") + 1]
+    assert "[0:a]asetpts=N/SR/TB,volume=1[mixed]" in combined_graph
+    assert "atrim=start=30.000:duration=30.000,asetpts=N/SR/TB" in combined_graph
+
+    assert exporter._render_preview(
+        "ffmpeg", full, tmp_path / "fallback-preview.ogg", 120.0,
+    ) is True
+    preview_filter = commands[-1][0][commands[-1][0].index("-af") + 1]
+    assert preview_filter.startswith("asetpts=N/SR/TB,")
 
 
 def test_atomic_publish_retries_if_first_output_appears_during_publication(
@@ -194,6 +252,36 @@ def test_export_rejects_unwritable_destination_before_audio_work(tmp_path, monke
     assert list(output_dir.iterdir()) == []
 
 
+def test_export_uses_injected_ffmpeg_resolver_instead_of_host_lookup(
+        tmp_path, monkeypatch):
+    source = tmp_path / "song.feedpak"
+    with zipfile.ZipFile(source, "w") as archive:
+        archive.writestr("manifest.yaml", yaml.safe_dump({
+            "title": "Song",
+            "stems": [{"id": "full", "file": "stems/full.ogg"}],
+        }))
+        archive.writestr("stems/full.ogg", b"not decoded in this test")
+    output_dir = tmp_path / "exports"
+    output_dir.mkdir()
+    calls = []
+
+    def managed_resolver():
+        calls.append("resolve")
+        return "C:/verified-tools/ffmpeg.exe"
+
+    monkeypatch.setattr(
+        exporter, "_ffmpeg_cmd",
+        lambda: (_ for _ in ()).throw(AssertionError("host FFmpeg lookup used")),
+    )
+
+    with pytest.raises(exporter.ExportError, match="at least one"):
+        exporter.export_minus_mix(
+            source, output_dir, ["full"], ffmpeg_resolver=managed_resolver,
+        )
+
+    assert calls == ["resolve"]
+
+
 @pytest.mark.skipif(not FFMPEG, reason="ffmpeg is required for a real-audio export")
 def test_export_removes_selected_audio_preserves_assets_and_never_mutates_source(tmp_path):
     source = _make_source(tmp_path)
@@ -240,6 +328,9 @@ def test_export_removes_selected_audio_preserves_assets_and_never_mutates_source
     preview_high = _tone_amplitude(rendered_preview, 440)
     assert preview_low > 0.01
     assert preview_high < preview_low / 6.0
+    if FFPROBE:
+        assert _timestamp_regressions(rendered) == {"pts": 0, "dts": 0}
+        assert _timestamp_regressions(rendered_preview) == {"pts": 0, "dts": 0}
 
     # A second export chooses a new name; it never asks whether overwriting is OK.
     second = exporter.export_minus_mix(source, out_dir, ["guitar"])
@@ -281,15 +372,17 @@ def test_single_stem_source_uses_temporary_separator_and_discards_its_outputs(tm
         def obtain(full_mix: Path, separation_dir: Path,
                    requested: tuple[str, ...], full_digest: str | None):
             assert full_mix.is_file()
-            assert requested == ("guitar",)
+            assert requested == exporter.MIX_STEMS
             assert full_digest == _sha256(full_mix)
             temporary_dirs.append(separation_dir)
-            guitar = separation_dir / "guitar.ogg"
-            _ogg_sine(guitar, 440)
-            # A six-stem engine may also return files the exporter did not request.
-            other = separation_dir / "drums.ogg"
-            _ogg_sine(other, 220)
-            return {"guitar": guitar, "drums": other}
+            produced = {}
+            for stem in requested:
+                path = separation_dir / f"{stem}.ogg"
+                _ogg_sine(path, 110 if stem == "bass" else 440,
+                          volume=0.75 if stem == "guitar" else 1 if stem == "bass" else 0)
+                produced[stem] = path
+            return produced
+
 
     result = exporter.export_minus_mix(
         source, out_dir, ["guitar"], stem_provider=TemporaryProvider(),

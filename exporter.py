@@ -11,6 +11,7 @@ unique rather than overwriting anything.
 from __future__ import annotations
 
 import hashlib
+import math
 import os
 import re
 import shutil
@@ -39,6 +40,9 @@ KNOWN_LABELS = {
     "piano": "Piano",
     "other": "Other",
 }
+MIX_STEMS = tuple(KNOWN_LABELS)
+RENDER_METHOD = "retained_stem_sum"
+RENDER_VERSION = 1
 _ARCHIVE_EXTS = {".feedpak", ".sloppak"}
 _ALREADY_COMPRESSED = {".ogg", ".mp3", ".flac", ".png", ".jpg", ".jpeg", ".webp", ".zip"}
 _INVALID_FILENAME = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
@@ -97,6 +101,31 @@ class SourceInfo:
     arrangements: tuple[dict, ...]
     full_mix_file: str
     derived_exclusions: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class StemPlan:
+    included: tuple[str, ...]
+    requested: tuple[str, ...]
+
+
+def plan_stems(info: SourceInfo, exclusions: Iterable[str]) -> StemPlan:
+    selected = _selected_exclusions(exclusions)
+    saved = {stem.id for stem in info.stems if stem.id != "full"}
+    unknown = saved - set(MIX_STEMS)
+    if unknown:
+        raise ExportError("ambiguous saved stem set: " + ", ".join(sorted(unknown)))
+    files = [stem.file for stem in info.stems]
+    if len(files) != len(set(files)):
+        raise ExportError("ambiguous stem set: different instruments reference the same audio file")
+    included = tuple(stem for stem in MIX_STEMS if stem not in selected)
+    # Never splice an older partial set together with a new separation. Asking
+    # for the complete inventory also proves the model separates excluded parts
+    # (a four-stem model's 'other' track can still contain all of the guitar).
+    requested = () if set(MIX_STEMS).issubset(saved) else MIX_STEMS
+    if requested and not info.full_mix_file:
+        raise ExportError("incomplete saved stems and no original full mix for separation")
+    return StemPlan(included, requested)
 
 
 @dataclass(frozen=True)
@@ -166,8 +195,8 @@ def _source_info(source: Path, manifest: dict,
         legacy = manifest.get("original_audio")
         if isinstance(legacy, str) and legacy.strip():
             full = StemInfo("full", _member_name(legacy.strip()))
-    if full is None:
-        raise ExportError("the source feedpak has no full mix to subtract from")
+    if full is None and not set(MIX_STEMS).issubset(stems):
+        raise ExportError("the source feedpak has no full mix and no complete saved stem set")
     instruments = tuple(s for sid, s in stems.items() if sid != "full")
     arrangements = tuple(a for a in (manifest.get("arrangements") or []) if isinstance(a, dict))
     derived = manifest.get("minus_mix")
@@ -180,9 +209,9 @@ def _source_info(source: Path, manifest: dict,
     return SourceInfo(
         title=str(manifest.get("title") or source.stem),
         artist=str(manifest.get("artist") or ""),
-        stems=(full,) + instruments,
+        stems=((full,) if full else ()) + instruments,
         arrangements=arrangements,
-        full_mix_file=full.file,
+        full_mix_file=full.file if full else "",
         derived_exclusions=derived_exclusions,
     )
 
@@ -205,6 +234,38 @@ def prepare_source(source: Path) -> PreparedSource:
 
 def inspect_source(source: Path) -> SourceInfo:
     return prepare_source(source).info
+
+
+def source_fingerprint(source: Path, cancel_cb=None) -> str:
+    digest = hashlib.sha256()
+    entries = _source_entries(source) if source.is_dir() else [("", source)]
+    for name, path in entries:
+        if source.is_dir():
+            digest.update(name.encode("utf-8") + b"\0")
+            digest.update(str(path.stat().st_size).encode("ascii") + b"\0")
+        with path.open("rb") as handle:
+            while chunk := handle.read(1024 * 1024):
+                _checkpoint(cancel_cb)
+                digest.update(chunk)
+    return digest.hexdigest()
+
+
+def is_current_output(output: Path, source: Path, exclusions, source_digest=None) -> bool:
+    """Legacy subtraction outputs are preserved, but never count as this render."""
+    try:
+        selected = _selected_exclusions(exclusions)
+        manifest = _manifest(output)
+        marker = manifest.get("minus_mix") or {}
+        if (marker.get("render_method") != RENDER_METHOD
+                or marker.get("render_version") != RENDER_VERSION
+                or set(marker.get("excluded_stems", [])) != set(selected)
+                or set(marker.get("included_stems", [])) != set(MIX_STEMS) - set(selected)
+                or marker.get("source_sha256") != (source_digest or source_fingerprint(source))):
+            return False
+        with zipfile.ZipFile(output) as archive:
+            return archive.getinfo(FULL_MIX_REL).file_size > 100 and archive.testzip() is None
+    except (OSError, ValueError, KeyError, AttributeError, TypeError, zipfile.BadZipFile, ExportError):
+        return False
 
 
 class SourcePackage:
@@ -288,6 +349,106 @@ def _ffmpeg_detail(stderr: bytes, *paths: Path) -> str:
     return (lines[-1] if lines else "unknown ffmpeg error")[:500]
 
 
+def _audio_process(command, cancel_cb=None, timeout=1800):
+    """Bounded diagnostics and cancellation for both analysis and rendering."""
+    started = time.monotonic()
+    with tempfile.TemporaryFile() as error_log:
+        flags = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
+        proc = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                stderr=error_log, **flags)
+        try:
+            while proc.poll() is None:
+                _checkpoint(cancel_cb)
+                if time.monotonic() - started > timeout:
+                    raise ExportError("audio rendering timed out")
+                time.sleep(0.1)
+        finally:
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait()
+        error_log.seek(0, os.SEEK_END)
+        error_log.seek(max(0, error_log.tell() - 64 * 1024))
+        return proc.returncode, error_log.read()
+
+
+@dataclass(frozen=True)
+class AudioInfo:
+    rate: int
+    channels: int
+    frames: int
+    peak: float
+
+    @property
+    def timeline(self):
+        return self.rate, self.channels, self.frames
+
+
+def _analyze_audio(ffmpeg, path, cancel_cb=None):
+    """Decode fully, including silent tracks, without depending on ffprobe."""
+    code, raw = _audio_process([
+        ffmpeg, "-hide_banner", "-nostdin", "-xerror", "-i", str(path),
+        "-map", "0:a:0", "-af", "ashowinfo,astats=measure_perchannel=none:"
+        "measure_overall=Peak_level+Number_of_samples+Number_of_NaNs+Number_of_Infs:reset=0",
+        "-f", "null", "-",
+    ], cancel_cb)
+    text = raw.decode("utf-8", "replace")
+    layout = re.findall(r"channels:(\d+).*?rate:(\d+) nb_samples:", text)
+    def metric(label):
+        values = re.findall(re.escape(label) + r":\s*([^\s]+)", text)
+        return float(values[-1]) if values else float("nan")
+    frames, peak = metric("Number of samples"), metric("Peak level dB")
+    if (code or not layout or not math.isfinite(frames) or frames <= 0
+            or math.isnan(peak) or peak == float("inf")
+            or metric("Number of NaNs") != 0 or metric("Number of Infs") != 0):
+        raise ExportError("invalid or incomplete audio: " + _ffmpeg_detail(raw, path))
+    channels, rate = map(int, layout[-1])
+    if channels not in (1, 2):
+        raise ExportError("MinusMix requires mono or stereo stems")
+    return AudioInfo(rate, channels, int(frames), 10 ** (peak / 20))
+
+
+def _sum_stems(ffmpeg, retained, output, reference, cancel_cb):
+    if not retained:
+        raise ExportError("keep at least one instrument stem in the backing track")
+    infos = [_analyze_audio(ffmpeg, path, cancel_cb) for path in retained]
+    expected = _analyze_audio(ffmpeg, reference, cancel_cb) if reference.is_file() else infos[0]
+    # Separators commonly emit 44.1 kHz stereo even for 48 kHz or mono input.
+    # Permit at most 1 ms of codec/resampling rounding at the tail, never a
+    # materially shortened stem, and preserve the original decoded frame count.
+    tolerance = max(2, math.ceil(expected.rate / 1000))
+    if any(abs(round(info.frames * expected.rate / info.rate) - expected.frames) > tolerance
+           for info in infos):
+        raise ExportError("stem decoded durations differ; re-split the original song")
+    command = [ffmpeg, "-hide_banner", "-nostdin", "-xerror", "-y"]
+    for path in retained:
+        command.extend(["-i", str(path)])
+    inputs = ""
+    for index, info in enumerate(infos):
+        channels = ""
+        if info.channels != expected.channels:
+            channels = ("pan=mono|c0=0.5*c0+0.5*c1," if expected.channels == 1
+                        else "pan=stereo|c0=c0|c1=c0,")
+        inputs += (f"[{index}:a]aresample={expected.rate},{channels}"
+                   f"apad=whole_len={expected.frames},atrim=end_sample={expected.frames},"
+                   f"asetpts=N/SR/TB[s{index}];")
+    inputs += "".join(f"[s{index}]" for index in range(len(retained)))
+    graph = inputs + (f"amix=inputs={len(retained)}:duration=longest:"
+                      "dropout_transition=0:normalize=0,asetpts=N/SR/TB[out]")
+    command.extend(["-filter_complex", graph, "-map", "[out]", "-map_metadata", "-1",
+                    "-c:a", "pcm_f32le", "-rf64", "auto", str(output)])
+    code, detail = _audio_process(command, cancel_cb)
+    if code:
+        raise ExportError("could not mix retained stems: " + _ffmpeg_detail(detail, *retained))
+    mixed = _analyze_audio(ffmpeg, output, cancel_cb)
+    if mixed.timeline != expected.timeline:
+        raise ExportError("mixed audio changed the source timeline")
+    return mixed
+
+
 def _run_ogg_command(command: list[str], output: Path | Iterable[Path], *, timeout: int = 1800,
                      cancel_cb: CancelCallback | None = None) -> None:
     """Run a cancelable Ogg encode, with a built-in Vorbis fallback."""
@@ -308,43 +469,7 @@ def _run_ogg_command(command: list[str], output: Path | Iterable[Path], *, timeo
     last_returncode = None
     last_stderr = b""
     for cmd in attempts:
-        started = time.monotonic()
-        with tempfile.TemporaryFile() as error_log:
-            proc = subprocess.Popen(
-                cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                stderr=error_log,
-            )
-            try:
-                while proc.poll() is None:
-                    if cancel_cb:
-                        try:
-                            cancel_cb()
-                        except BaseException:
-                            proc.terminate()
-                            try:
-                                proc.wait(timeout=5)
-                            except Exception:
-                                proc.kill()
-                                proc.wait()
-                            raise
-                    if time.monotonic() - started > timeout:
-                        proc.terminate()
-                        try:
-                            proc.wait(timeout=5)
-                        except Exception:
-                            proc.kill()
-                            proc.wait()
-                        raise ExportError("audio rendering timed out")
-                    time.sleep(0.2)
-            finally:
-                if proc.poll() is None:
-                    proc.kill()
-                    proc.wait()
-            last_returncode = proc.returncode
-            error_log.seek(0, os.SEEK_END)
-            size = error_log.tell()
-            error_log.seek(max(0, size - 64 * 1024))
-            last_stderr = error_log.read()
+        last_returncode, last_stderr = _audio_process(cmd, cancel_cb, timeout)
 
         if last_returncode == 0 and all(
                 path.is_file() and path.stat().st_size >= 100 for path in outputs):
@@ -361,26 +486,12 @@ def _run_ogg_command(command: list[str], output: Path | Iterable[Path], *, timeo
     raise ExportError(f"ffmpeg could not render the MinusMix audio: {detail}")
 
 
-def _render_mix(ffmpeg: str, full_mix: Path, excluded: list[Path], output: Path,
-                cancel_cb: CancelCallback | None = None) -> None:
+def _render_mix(ffmpeg: str, full_mix: Path, output: Path,
+                cancel_cb: CancelCallback | None = None, gain: float = 1.0) -> None:
     cmd = [ffmpeg, "-hide_banner", "-nostdin", "-y", "-i", str(full_mix)]
-    for stem in excluded:
-        cmd.extend(["-i", str(stem)])
-
-    filters: list[str] = []
-    negative_labels: list[str] = []
-    for index in range(1, len(excluded) + 1):
-        label = f"neg{index}"
-        filters.append(f"[{index}:a]volume=-1:precision=double[{label}]")
-        negative_labels.append(f"[{label}]")
-    inputs = "[0:a]" + "".join(negative_labels)
-    filters.append(
-        f"{inputs}amix=inputs={1 + len(excluded)}:duration=first:"
-        "dropout_transition=0:normalize=0[out]"
-    )
     cmd.extend([
-        "-filter_complex", ";".join(filters),
-        "-map", "[out]", "-vn", "-sn", "-dn", "-map_metadata", "-1",
+        "-af", f"asetpts=N/SR/TB,volume={gain:.16g}",
+        "-vn", "-sn", "-dn", "-map_metadata", "-1",
         "-c:a", "libvorbis", "-q:a", "5", str(output),
     ])
     _run_ogg_command(cmd, output, cancel_cb=cancel_cb)
@@ -401,7 +512,10 @@ def _render_preview(ffmpeg: str, mix: Path, output: Path, duration_value,
     cmd = [
         ffmpeg, "-hide_banner", "-nostdin", "-y", "-ss", f"{start:.3f}",
         "-i", str(mix), "-t", f"{clip:.3f}",
-        "-af", f"afade=t=in:st=0:d={fade:.3f},afade=t=out:st={fade_out:.3f}:d={fade:.3f}",
+        "-af", (
+            f"asetpts=N/SR/TB,afade=t=in:st=0:d={fade:.3f},"
+            f"afade=t=out:st={fade_out:.3f}:d={fade:.3f}"
+        ),
         "-vn", "-sn", "-dn", "-map_metadata", "-1",
         "-c:a", "libvorbis", "-q:a", "3", str(output),
     ]
@@ -501,40 +615,27 @@ def _preview_window(duration_value) -> tuple[float, float, float, float] | None:
     return start, clip, fade, max(0.0, clip - fade)
 
 
-def _render_mix_and_preview(ffmpeg: str, full_mix: Path, excluded: list[Path],
+def _render_mix_and_preview(ffmpeg: str, full_mix: Path,
                             mix_output: Path, preview_output: Path,
                             duration_value,
-                            cancel_cb: CancelCallback | None = None) -> bool:
+                            cancel_cb: CancelCallback | None = None, gain: float = 1.0) -> bool:
     """Render the playable mix and optional preview from one decoded graph."""
     window = _preview_window(duration_value)
     if window is None:
-        _render_mix(ffmpeg, full_mix, excluded, mix_output, cancel_cb=cancel_cb)
+        _render_mix(ffmpeg, full_mix, mix_output, cancel_cb=cancel_cb, gain=gain)
         return False
 
     start, clip, fade, fade_out = window
     cmd = [ffmpeg, "-hide_banner", "-nostdin", "-y", "-i", str(full_mix)]
-    for stem in excluded:
-        cmd.extend(["-i", str(stem)])
-
-    filters: list[str] = []
-    negative_labels: list[str] = []
-    for index in range(1, len(excluded) + 1):
-        label = f"neg{index}"
-        filters.append(f"[{index}:a]volume=-1:precision=double[{label}]")
-        negative_labels.append(f"[{label}]")
-    inputs = "[0:a]" + "".join(negative_labels)
-    filters.extend([
-        (
-            f"{inputs}amix=inputs={1 + len(excluded)}:duration=first:"
-            "dropout_transition=0:normalize=0[mixed]"
-        ),
+    filters = [
+        f"[0:a]asetpts=N/SR/TB,volume={gain:.16g}[mixed]",
         "[mixed]asplit=2[fullout][previewbase]",
         (
             f"[previewbase]atrim=start={start:.3f}:duration={clip:.3f},"
-            f"asetpts=PTS-STARTPTS,afade=t=in:st=0:d={fade:.3f},"
+            f"asetpts=N/SR/TB,afade=t=in:st=0:d={fade:.3f},"
             f"afade=t=out:st={fade_out:.3f}:d={fade:.3f}[previewout]"
         ),
-    ])
+    ]
     cmd.extend([
         "-filter_complex", ";".join(filters),
         "-map", "[fullout]", "-vn", "-sn", "-dn", "-map_metadata", "-1",
@@ -550,7 +651,7 @@ def _render_mix_and_preview(ffmpeg: str, full_mix: Path, excluded: list[Path],
     except ExportError:
         # A preview is optional. Fall back to the established independent path
         # so a preview-filter incompatibility can never block the main export.
-        _render_mix(ffmpeg, full_mix, excluded, mix_output, cancel_cb=cancel_cb)
+        _render_mix(ffmpeg, full_mix, mix_output, cancel_cb=cancel_cb, gain=gain)
         return _render_preview(
             ffmpeg, mix_output, preview_output, duration_value,
             cancel_cb=cancel_cb,
@@ -676,6 +777,7 @@ class RenderedAudio:
     full_mix: Path
     preview: Path
     preview_created: bool
+    gain: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -714,10 +816,14 @@ def _selected_exclusions(values: Iterable[str]) -> tuple[str, ...]:
     selected: list[str] = []
     for raw in values:
         stem_id = str(raw or "").strip().lower()
+        if stem_id and stem_id != "full" and stem_id not in KNOWN_LABELS:
+            raise ExportError("unsupported instrument stem: " + stem_id)
         if stem_id and stem_id != "full" and stem_id not in selected:
             selected.append(stem_id)
     if not selected:
         raise ExportError("choose at least one instrument stem to exclude")
+    if set(selected) == set(MIX_STEMS):
+        raise ExportError("keep at least one instrument stem in the backing track")
     return tuple(selected)
 
 
@@ -727,15 +833,18 @@ def _extract_source_audio(prepared: PreparedSource, selected: tuple[str, ...],
     full_local = work / f"full{full_suffix}"
     saved: dict[str, Path] = {}
     with SourcePackage(prepared.source) as package:
-        digest = package.copy_member(
-            prepared.info.full_mix_file, full_local,
-            calculate_digest=bool(missing),
-        )
-        for index, stem_id in enumerate(selected, 1):
+        digest = None
+        if prepared.info.full_mix_file:
+            digest = package.copy_member(
+                prepared.info.full_mix_file, full_local,
+                calculate_digest=bool(missing),
+            )
+        # A partial set is replaced in the temporary workspace as a unit.
+        for index, stem_id in enumerate(() if missing else selected, 1):
             stem = prepared.stem_map.get(stem_id)
             if stem is None:
                 continue
-            local = work / f"excluded_{index}{Path(stem.file).suffix or '.audio'}"
+            local = work / f"retained_{index}{Path(stem.file).suffix or '.audio'}"
             package.copy_member(stem.file, local)
             saved[stem_id] = local
     return ExtractedAudio(full_local, saved, digest)
@@ -781,6 +890,9 @@ def _obtain_missing_stems(provider: StemProvider | None, extracted: ExtractedAud
         raise ExportError(
             "the separation engine did not produce: " + ", ".join(still_missing)
         )
+    paths = [temporary[stem] for stem in missing]
+    if len(paths) != len(set(paths)):
+        raise ExportError("separation returned the same audio file for different instruments")
     return temporary
 
 
@@ -788,21 +900,36 @@ def _render_export_audio(ffmpeg: str, prepared: PreparedSource,
                          selected: tuple[str, ...], extracted: ExtractedAudio,
                          temporary: dict[str, Path], work: Path,
                          cancel_cb: CancelCallback | None) -> RenderedAudio:
-    excluded = [
+    retained = [
         extracted.saved_stems.get(stem_id) or temporary[stem_id]
         for stem_id in selected
     ]
     full_output = work / "minus-mix-full.ogg"
     preview_output = work / "preview.ogg"
-    preview_created = _render_mix_and_preview(
-        ffmpeg, extracted.full_mix, excluded, full_output, preview_output,
-        prepared.manifest.get("duration"), cancel_cb=cancel_cb,
-    )
-    return RenderedAudio(full_output, preview_output, preview_created)
+    summed = work / "retained-sum.wav"
+    info = _sum_stems(ffmpeg, retained, summed, extracted.full_mix, cancel_cb)
+    gain = min(1.0, 0.98 / info.peak) if info.peak else 1.0
+    for _attempt in range(3):
+        preview_created = _render_mix_and_preview(
+            ffmpeg, summed, full_output, preview_output,
+            info.frames / info.rate, cancel_cb=cancel_cb, gain=gain,
+        )
+        encoded = _analyze_audio(ffmpeg, full_output, cancel_cb)
+        if encoded.timeline != info.timeline:
+            raise ExportError("encoded backing track changed the source timeline")
+        peak = encoded.peak
+        if preview_created:
+            peak = max(peak, _analyze_audio(ffmpeg, preview_output, cancel_cb).peak)
+        if peak <= 0.99:
+            return RenderedAudio(full_output, preview_output, preview_created, gain)
+        # Re-encode the lossless sum, never the lossy output. One constant gain
+        # preserves balance and dynamics; do not boost a quiet or silent intro.
+        gain *= 0.95 / peak
+    raise ExportError("could not render a backing track without clipping")
 
 
 def _package_plan(prepared: PreparedSource, selected: tuple[str, ...],
-                  rendered: RenderedAudio) -> PackagePlan:
+                  rendered: RenderedAudio, source_digest: str) -> PackagePlan:
     suffix = _suffix(selected)
     manifest = dict(prepared.manifest)
     source_title = str(prepared.manifest.get("title") or prepared.source.stem)
@@ -814,6 +941,11 @@ def _package_plan(prepared: PreparedSource, selected: tuple[str, ...],
         "excluded_stems": list(selected),
         "source_title": source_title,
         "generator": "minus_mix",
+        "render_method": RENDER_METHOD,
+        "render_version": RENDER_VERSION,
+        "included_stems": [stem for stem in MIX_STEMS if stem not in selected],
+        "source_sha256": source_digest,
+        "output_gain": rendered.gain,
     }
     manifest.pop("original_audio", None)
 
@@ -823,6 +955,8 @@ def _package_plan(prepared: PreparedSource, selected: tuple[str, ...],
     else:
         manifest.pop("preview", None)
     remove = {stem.file for stem in prepared.stem_map.values()}
+    if prepared.info.full_mix_file:
+        remove.add(prepared.info.full_mix_file)
     if isinstance(old_preview, str) and old_preview.strip():
         remove.add(_member_name(old_preview.strip()))
     replacements = {FULL_MIX_REL: rendered.full_mix}
@@ -860,6 +994,7 @@ def export_minus_mix(source: Path, output_dir: Path, excluded_stems: Iterable[st
                      prepared_source: PreparedSource | None = None,
                      stem_provider: StemProvider | None = None,
                      separate_missing: TemporarySeparator | None = None,
+                     ffmpeg_resolver: Callable[[], str | None] | None = None,
                      progress_cb: ProgressCallback | None = None,
                      cancel_cb: CancelCallback | None = None,
                      log=None) -> ExportResult:
@@ -878,13 +1013,17 @@ def export_minus_mix(source: Path, output_dir: Path, excluded_stems: Iterable[st
             raise ExportError("the output folder cannot be inside a directory-form source feedpak")
     output_dir = validate_output_directory(output_dir)
 
-    ffmpeg = _ffmpeg_cmd()
+    ffmpeg = ffmpeg_resolver() if ffmpeg_resolver is not None else _ffmpeg_cmd()
     if not ffmpeg:
-        raise ExportError("ffmpeg is not available; repair or reinstall the desktop app")
+        raise ExportError(
+            "ffmpeg is unavailable; install or update Stem Splitter's managed server, "
+            "or repair the desktop app"
+        )
 
     prepared = _resolve_prepared_source(source, prepared_source)
     selected = _selected_exclusions(excluded_stems)
-    missing = tuple(stem_id for stem_id in selected if stem_id not in prepared.stem_map)
+    stem_plan = plan_stems(prepared.info, selected)
+    missing = stem_plan.requested
     provider = stem_provider
     if provider is None and separate_missing is not None:
         provider = CallbackStemProvider(separate_missing)
@@ -896,26 +1035,29 @@ def export_minus_mix(source: Path, output_dir: Path, excluded_stems: Iterable[st
 
     with tempfile.TemporaryDirectory(prefix="feedback_minus_mix_") as td:
         work = Path(td)
+        source_digest = source_fingerprint(source, cancel_cb)
         _checkpoint(cancel_cb)
         _report(progress_cb, "extracting", 0.04, "Reading the full mix")
-        extracted = _extract_source_audio(prepared, selected, missing, work)
+        extracted = _extract_source_audio(prepared, stem_plan.included, missing, work)
         if missing:
             _checkpoint(cancel_cb)
-            _report(progress_cb, "separating", 0.08, "Separating selected audio temporarily")
+            _report(progress_cb, "separating", 0.08, "Obtaining a complete instrument stem set")
         temporary = _obtain_missing_stems(provider, extracted, missing, work)
 
         _checkpoint(cancel_cb)
         _report(progress_cb, "rendering", 0.78, "Rendering the MinusMix backing track")
         rendered = _render_export_audio(
-            ffmpeg, prepared, selected, extracted, temporary, work, cancel_cb,
+            ffmpeg, prepared, stem_plan.included, extracted, temporary, work, cancel_cb,
         )
         _checkpoint(cancel_cb)
         _report(progress_cb, "preview", 0.88, "Finalizing the preview")
         if not rendered.preview_created and log:
             log.warning("minus_mix: preview render failed; exporting without a preview")
 
-        plan = _package_plan(prepared, selected, rendered)
+        plan = _package_plan(prepared, selected, rendered, source_digest)
         _checkpoint(cancel_cb)
+        if source_fingerprint(source, cancel_cb) != source_digest:
+            raise ExportError("source package changed during export; please retry")
         _report(progress_cb, "packaging", 0.94, "Packaging the new feedpak")
         final_path = _publish_package(prepared, output_dir, plan)
 

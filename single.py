@@ -39,6 +39,7 @@ class SingleJob(TypedDict, total=False):
     stage: str
     progress: float
     detail: str
+    state: str
     result: SingleExportResult | None
 
 
@@ -54,32 +55,51 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _service_block(exc: BaseException) -> BaseException | None:
+    """Find a structured service block through the exporter's error wrapper."""
+    seen: set[int] = set()
+    for _ in range(32):
+        if id(exc) in seen:
+            break
+        seen.add(id(exc))
+        if getattr(exc, "blocks_batch", False) is True:
+            return exc
+        cause = exc.__cause__ or exc.__context__
+        if cause is None:
+            break
+        exc = cause
+    return None
+
+
 class SeparatorStemProvider:
     """Adapt the server client to the exporter's stem-provider boundary."""
 
     def __init__(self, separator, checkpoint: Callable[[], None],
-                 progress: Callable[[float, str], None]):
+                 progress: Callable[[float, str], None],
+                 state: Callable[[dict], None] | None = None):
         self.separator = separator
         self.checkpoint = checkpoint
         self.progress = progress
+        self.state = state
 
     def obtain(self, mix: Path, work: Path, stems: tuple[str, ...],
                full_digest: str | None) -> dict[str, Path]:
         del full_digest  # Single exports do not need the batch duplicate cache.
         self.checkpoint()
-        return self.separator.separate(
-            mix, work, stems,
-            progress_cb=self.progress, cancel_cb=self.checkpoint,
-        )
+        options = {"progress_cb": self.progress, "cancel_cb": self.checkpoint}
+        if getattr(self.separator, "supports_state_callback", False):
+            options["state_cb"] = self.state
+        return self.separator.separate(mix, work, stems, **options)
 
 
 class SingleExportManager:
     """Run at most one single-song export at a time per app process."""
 
-    def __init__(self, exporter, separator, log):
+    def __init__(self, exporter, separator, log, ffmpeg_resolver=None):
         self.exporter = exporter
         self.separator = separator
         self.log = log
+        self.ffmpeg_resolver = ffmpeg_resolver
         self.lock = threading.RLock()
         self.jobs: dict[str, SingleJob] = {}
         self.cancel_events: dict[str, threading.Event] = {}
@@ -123,6 +143,7 @@ class SingleExportManager:
         prepare = getattr(self.exporter, "prepare_source", None)
         prepared_source = prepare(source) if callable(prepare) else None
         info = prepared_source.info if prepared_source is not None else self.exporter.inspect_source(source)
+        self.exporter.plan_stems(info, selected)
         job_id = uuid.uuid4().hex
         job = {
             "id": job_id,
@@ -214,16 +235,33 @@ class SingleExportManager:
             checkpoint()
             self._update(job_id, stage=stage, progress=fraction, detail=detail)
 
+        separation_stage = "separating"
+
         def separation_progress(value, message) -> None:
             checkpoint()
             mapped = 0.08 + max(0.0, min(1.0, float(value))) * 0.66
-            self._update(
-                job_id, stage="separating", progress=mapped,
-                detail=str(message or "Separating audio"),
-            )
+            with self.lock:
+                mapped = max(mapped, self.jobs[job_id]["progress"])
+                self._update(
+                    job_id, stage=separation_stage, progress=mapped,
+                    detail=str(message or "Separating audio"),
+                )
+
+        def separation_state(payload: dict) -> None:
+            nonlocal separation_stage
+            checkpoint()
+            state = payload.get("state") if isinstance(payload, dict) else None
+            if state not in {"waiting_for_server", "separating", "downloading"}:
+                return
+            separation_stage = "waiting_for_server" if state == "waiting_for_server" else "separating"
+            with self.lock:
+                self._update(
+                    job_id, stage=separation_stage, progress=self.jobs[job_id]["progress"],
+                    detail=str(payload.get("detail") or "Separating audio"),
+                )
 
         stem_provider = SeparatorStemProvider(
-            self.separator, checkpoint, separation_progress,
+            self.separator, checkpoint, separation_progress, separation_state,
         )
 
         try:
@@ -231,6 +269,8 @@ class SingleExportManager:
                 "stem_provider": stem_provider,
                 "progress_cb": progress, "cancel_cb": checkpoint, "log": self.log,
             }
+            if self.ffmpeg_resolver is not None:
+                export_options["ffmpeg_resolver"] = self.ffmpeg_resolver
             if prepared_source is not None:
                 export_options["prepared_source"] = prepared_source
             result = self.exporter.export_minus_mix(
@@ -254,16 +294,21 @@ class SingleExportManager:
                     "result": payload, "completed_at": _now(),
                 })
         except Exception as exc:
+            blocked = _service_block(exc)
             with self.lock:
                 canceled = event.is_set()
+                status = "canceled" if canceled else "blocked" if blocked else "failed"
+                failure = blocked or exc
                 self.jobs[job_id].update({
-                    "status": "canceled" if canceled else "failed",
-                    "stage": "canceled" if canceled else "failed",
-                    "progress": 0.0 if canceled else 1.0,
-                    "detail": "Canceled" if canceled else (str(exc)[:500] or type(exc).__name__),
+                    "status": status, "stage": status,
+                    "progress": (0.0 if canceled else self.jobs[job_id]["progress"]
+                                 if blocked else 1.0),
+                    "detail": "Canceled" if canceled else (str(failure)[:500] or type(failure).__name__),
                     "completed_at": _now(),
                 })
-            if not canceled:
+                if blocked and not canceled:
+                    self.jobs[job_id]["state"] = str(getattr(blocked, "state", "unavailable"))
+            if not canceled and not blocked:
                 self.log.exception("minus_mix: single export failed")
         finally:
             with self.lock:

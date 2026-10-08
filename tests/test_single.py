@@ -24,6 +24,7 @@ def _wait(manager: single.SingleExportManager, job_id: str, timeout: float = 3.0
 
 
 class CompletingExporter:
+    plan_stems = staticmethod(lambda info, selected: None)
     @staticmethod
     def inspect_source(source: Path):
         return SimpleNamespace(title="Test Song")
@@ -65,6 +66,36 @@ def test_single_export_runs_in_background_and_publishes_result(tmp_path):
     assert completed["result"]["filename"] == "Test Song (No Guitar).feedpak"
     assert completed["result"]["source_unchanged"] is True
     assert manager.is_active() is False
+
+
+def test_single_export_passes_injected_ffmpeg_resolver_to_exporter(tmp_path):
+    source = tmp_path / "song.feedpak"
+    source.write_bytes(b"source")
+    received = []
+
+    def managed_resolver():
+        return "C:/verified-tools/ffmpeg.exe"
+
+    class ResolverExporter(CompletingExporter):
+        @staticmethod
+        def export_minus_mix(source, output_dir, selected, *, stem_provider,
+                             ffmpeg_resolver, progress_cb, cancel_cb, log):
+            received.append(ffmpeg_resolver)
+            assert ffmpeg_resolver() == "C:/verified-tools/ffmpeg.exe"
+            return CompletingExporter.export_minus_mix(
+                source, output_dir, selected, stem_provider=stem_provider,
+                progress_cb=progress_cb, cancel_cb=cancel_cb, log=log,
+            )
+
+    manager = single.SingleExportManager(
+        ResolverExporter(), SimpleNamespace(status=lambda: {"ready": False}), _log(),
+        ffmpeg_resolver=managed_resolver,
+    )
+
+    completed = _wait(manager, manager.start(source, tmp_path, ["guitar"])["id"])
+
+    assert completed["status"] == "completed"
+    assert received == [managed_resolver]
 
 
 def test_single_export_reuses_its_unchanged_prepared_source(tmp_path):
@@ -111,13 +142,14 @@ def test_cancel_after_atomic_publication_keeps_single_export_completed(
         "artist": "Test Artist",
         "stems": [
             {"id": "full", "file": "stems/full.ogg"},
-            {"id": "guitar", "file": "stems/guitar.ogg"},
+            *[{"id": stem, "file": f"stems/{stem}.ogg"} for stem in exporter.MIX_STEMS],
         ],
     }
     with zipfile.ZipFile(source, "w") as archive:
         archive.writestr("manifest.yaml", yaml.safe_dump(manifest))
         archive.writestr("stems/full.ogg", b"full")
-        archive.writestr("stems/guitar.ogg", b"guitar")
+        for stem in exporter.MIX_STEMS:
+            archive.writestr(f"stems/{stem}.ogg", stem.encode())
     output_dir = tmp_path / "output"
     output_dir.mkdir()
     published = threading.Event()

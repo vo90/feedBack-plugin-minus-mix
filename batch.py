@@ -10,6 +10,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import re
 import threading
 import time
 import uuid
@@ -35,6 +36,7 @@ class BatchCounts(TypedDict, total=False):
     skipped: int
     failed: int
     canceled: int
+    blocked: int
     temporary_separations: int
     duplicate_audio_reused: int
     preview_failures: int
@@ -58,6 +60,8 @@ class BatchJob(TypedDict, total=False):
     created_at: str
     completed_at: str | None
     detail: str
+    stage: str
+    state: str
     overall_progress: float
     counts: BatchCounts
     items: list[BatchItem]
@@ -77,29 +81,58 @@ class ScanCanceled(RuntimeError):
     """Internal folder-scan cancellation checkpoint."""
 
 
+def _service_block(exc: BaseException) -> BaseException | None:
+    """Find a structured service block through the exporter's error wrapper."""
+    seen: set[int] = set()
+    for _ in range(32):
+        if id(exc) in seen:
+            break
+        seen.add(id(exc))
+        if getattr(exc, "blocks_batch", False) is True:
+            return exc
+        cause = exc.__cause__ or exc.__context__
+        if cause is None:
+            break
+        exc = cause
+    return None
+
+
 class BatchStemProvider:
     """Provide server stems in an exporter-owned per-song workspace."""
 
     def __init__(self, separator, checkpoint: Callable[[], None],
-                 progress: Callable[[str, float, str], None]):
+                 progress: Callable[[str, float, str], None],
+                 state: Callable[[dict], None] | None = None):
         self.separator = separator
         self.checkpoint = checkpoint
         self.progress = progress
+        self.state = state
 
     def obtain(self, mix: Path, work: Path, stems: tuple[str, ...],
                full_digest: str | None) -> dict[str, Path]:
         del full_digest  # Per-song exports do not retain a cross-item stem cache.
         self.checkpoint()
+        stage = "separating"
 
         def separation_progress(value, message) -> None:
             self.checkpoint()
             mapped = 0.08 + max(0.0, min(1.0, float(value))) * 0.66
-            self.progress("separating", mapped, str(message or "Separating audio"))
+            self.progress(stage, mapped, str(message or "Separating audio"))
 
-        return self.separator.separate(
-            mix, work, stems,
-            progress_cb=separation_progress, cancel_cb=self.checkpoint,
-        )
+        def separation_state(payload: dict) -> None:
+            nonlocal stage
+            self.checkpoint()
+            value = payload.get("state") if isinstance(payload, dict) else None
+            if value not in {"waiting_for_server", "separating", "downloading"}:
+                return
+            stage = "waiting_for_server" if value == "waiting_for_server" else "separating"
+            if self.state:
+                self.state(payload)
+
+        options = {"progress_cb": separation_progress, "cancel_cb": self.checkpoint}
+        if getattr(self.separator, "supports_state_callback", False):
+            options["state_cb"] = separation_state
+        return self.separator.separate(mix, work, stems, **options)
 
 
 @dataclass(frozen=True)
@@ -222,6 +255,39 @@ def _reserve_output(desired: Path, reserved: set[str], *, avoid_existing: bool) 
     raise BatchError("could not find an unused output filename")
 
 
+def _output_index(directory):
+    """Index a destination once per scan, including numbered files after gaps."""
+    index = {}
+    if not directory.is_dir():
+        return index
+    for path in directory.iterdir():
+        index.setdefault(path.name.casefold(), []).append((1, path))
+        match = re.fullmatch(r"(.+) \((\d+)\)", path.stem)
+        if match and int(match[2]) >= 2:
+            key = (match[1] + path.suffix).casefold()
+            index.setdefault(key, []).append((int(match[2]), path))
+    return index
+
+
+def _conversion_target(exporter, source, desired, selected, reserved, skip_existing, indexes):
+    """Preserve old/different files and find a matching render or a free name."""
+    if skip_existing:
+        if desired.parent not in indexes:
+            indexes[desired.parent] = _output_index(desired.parent)
+        candidates = indexes[desired.parent].get(desired.name.casefold(), [])
+        source_digest = None
+        for number, candidate in sorted(candidates):
+            key = str(candidate).casefold()
+            if key in reserved or not candidate.is_file():
+                continue
+            source_digest = source_digest or exporter.source_fingerprint(source)
+            if exporter.is_current_output(candidate, source, selected, source_digest):
+                reserved.add(key)
+                return candidate, number > 1, True
+    candidate, renamed = _reserve_output(desired, reserved, avoid_existing=True)
+    return candidate, renamed, False
+
+
 def scan_sources(exporter, input_dir: str, output_dir: str, excluded_stems,
                   *, recursive: bool = True, skip_existing: bool = True,
                   skip_derived: bool = True, preserve_structure: bool = True,
@@ -257,6 +323,8 @@ def scan_sources(exporter, input_dir: str, output_dir: str, excluded_stems,
 
     items: list[dict] = []
     targets: set[str] = set()
+    output_indexes: dict = {}
+    required_separation_stems: set[str] = set()
     counts = {
         "found": len(files), "ready": 0, "needs_separation": 0,
         "uses_saved_stems": 0, "skipped_existing": 0,
@@ -282,7 +350,7 @@ def scan_sources(exporter, input_dir: str, output_dir: str, excluded_stems,
             item["artist"] = info.artist
             saved = {stem.id for stem in info.stems if stem.id != "full"}
             item["saved_stems"] = sorted(saved)
-            missing = [stem for stem in selected if stem not in saved]
+            missing = exporter.plan_stems(info, selected).requested
             item["needs_separation"] = bool(missing)
             if skip_derived and _looks_derived(info, source, exporter, selected):
                 item["scan_status"] = "skipped"
@@ -293,22 +361,25 @@ def scan_sources(exporter, input_dir: str, output_dir: str, excluded_stems,
                     output_root, relative, bool(preserve_structure),
                 )
                 first_choice = exporter.desired_output_path(destination_dir, source, selected)
-                desired, renamed = _reserve_output(
-                    first_choice, targets, avoid_existing=not bool(skip_existing),
+                desired, renamed, current = _conversion_target(
+                    exporter, source, first_choice, selected, targets, bool(skip_existing), output_indexes,
                 )
                 item["output_relative"] = desired.relative_to(output_root).as_posix()
                 item["output_name_collision"] = renamed
                 if renamed:
                     counts["renamed_collisions"] += 1
 
-                if skip_existing and desired.exists():
+                if current:
                     item["scan_status"] = "skipped"
-                    item["reason"] = "output already exists"
+                    item["reason"] = "matching stem-sum output already exists"
                     counts["skipped_existing"] += 1
                 else:
+                    if renamed:
+                        item["reason"] = "existing files preserved; creating a new stem-sum output"
                     counts["ready"] += 1
                     if missing:
                         counts["needs_separation"] += 1
+                        required_separation_stems.update(missing)
                     else:
                         counts["uses_saved_stems"] += 1
         except Exception as exc:
@@ -333,6 +404,7 @@ def scan_sources(exporter, input_dir: str, output_dir: str, excluded_stems,
         "truncated": truncated,
         "limit": MAX_BATCH_FILES,
         "counts": counts,
+        "required_separation_stems": sorted(required_separation_stems),
         "items": items,
     }
 
@@ -340,10 +412,11 @@ def scan_sources(exporter, input_dir: str, output_dir: str, excluded_stems,
 class BatchManager:
     """One persisted, sequential conversion queue per app process."""
 
-    def __init__(self, exporter, separator, config_dir: Path, log):
+    def __init__(self, exporter, separator, config_dir: Path, log, ffmpeg_resolver=None):
         self.exporter = exporter
         self.separator = separator
         self.log = log
+        self.ffmpeg_resolver = ffmpeg_resolver
         self.state_file = Path(config_dir) / "minus_mix_batch_jobs.json"
         self.lock = threading.RLock()
         self.persist_lock = threading.Lock()
@@ -395,7 +468,7 @@ class BatchManager:
                 job,
                 item_limit=(
                     MAX_PERSISTED_ITEMS
-                    if job.get("status") in ACTIVE_STATUSES else 0
+                    if job.get("status") in ACTIVE_STATUSES or job.get("status") == "blocked" else 0
                 ),
             )
             for job in ordered
@@ -439,7 +512,7 @@ class BatchManager:
         for index, item in enumerate(items):
             if len(selected) >= limit:
                 break
-            if item.get("status") == "running":
+            if item.get("status") in {"running", "blocked"}:
                 selected.add(index)
         for index in range(len(items) - 1, -1, -1):
             if len(selected) >= limit:
@@ -523,10 +596,9 @@ class BatchManager:
 
     def is_active(self) -> bool:
         with self.lock:
-            return self.starting or bool(
-                self.active_id
-                and self.jobs.get(self.active_id, {}).get("status") in ACTIVE_STATUSES
-            )
+            # A terminal status can be visible before its history reaches disk.
+            # Keep the reservation until the worker releases it after saving.
+            return self.starting or self.active_id is not None
 
     @staticmethod
     def _normalized_scan_options(options: dict) -> dict:
@@ -739,10 +811,7 @@ class BatchManager:
     def start(self, *, scan_id: str | None = None,
               snapshot_item_limit: int | None = None, **options) -> dict:
         with self.lock:
-            if self.starting or (
-                self.active_id
-                and self.jobs.get(self.active_id, {}).get("status") in ACTIVE_STATUSES
-            ):
+            if self.starting or self.active_id is not None:
                 raise BatchError("another MinusMix batch is already running")
             # Reserve the start before the potentially long authoritative scan.
             # Without this flag two simultaneous POSTs could both pass the
@@ -766,7 +835,7 @@ class BatchManager:
                 raise BatchError(str(exc)) from exc
             if scan["counts"]["needs_separation"]:
                 status = self.separator.status()
-                if not status.get("ready"):
+                if not status.get("ready") and status.get("waitable") is not True:
                     reason = status.get("reason") or (
                         "Stem Splitter's managed local server is unavailable"
                     )
@@ -774,6 +843,13 @@ class BatchManager:
                         "start Stem Splitter's managed local server before this batch: "
                         f"{reason}"
                     )
+                supported = status.get("supported_stems")
+                if isinstance(supported, list):
+                    missing = set(scan["required_separation_stems"]) - set(supported)
+                    if missing:
+                        raise BatchError(
+                            "the selected stem model does not provide: " + ", ".join(sorted(missing))
+                        )
         except Exception:
             with self.lock:
                 self.starting = False
@@ -819,6 +895,7 @@ class BatchManager:
                 "skipped": sum(item["status"] == "skipped" for item in items),
                 "failed": sum(item["status"] == "failed" for item in items),
                 "canceled": 0,
+                "blocked": 0,
                 "temporary_separations": 0,
                 "duplicate_audio_reused": 0,
                 "preview_failures": 0,
@@ -958,8 +1035,29 @@ class BatchManager:
             detail=message, force=True,
         )
 
+    def _mark_item_blocked(self, context: BatchRunContext, index: int,
+                           exc: BaseException) -> None:
+        message = str(exc)[:500] or "The stem server is unavailable"
+        state = str(getattr(exc, "state", "unavailable"))
+        with self.lock:
+            if context.event.is_set():
+                self._mark_item_canceled(context, index)
+                return
+            job = self.jobs[context.job_id]
+            item = job["items"][index]
+            item.update({"status": "blocked", "stage": "blocked", "state": state,
+                         "detail": message, "reason": message})
+            job["counts"]["blocked"] += 1
+            job.update({"status": "blocked", "stage": "blocked", "state": state,
+                        "detail": message, "completed_at": _now()})
+            # Keep accurate totals and an actionable bounded view. A fresh scan
+            # after repair finds pending work and skips already-published files.
+            self._compact_terminal_job_locked(job)
+            self._prune_jobs_locked()
+        self._persist(force=True)
+
     def _process_item(self, context: BatchRunContext, index: int) -> bool:
-        """Process one queued row; return False when cancellation stops the queue."""
+        """Process one row; return False when cancellation or a service block stops it."""
         relative_value = "unknown source"
         try:
             relative_value, source, planned_output = self._mark_item_running(context, index)
@@ -970,7 +1068,8 @@ class BatchManager:
                 raise BatchError("unsafe output subfolder")
             output_dir = planned_output.parent
             output_dir.mkdir(parents=True, exist_ok=True)
-            if context.skip_existing and planned_output.exists():
+            if (context.skip_existing and self.exporter.is_current_output(
+                    planned_output, source, context.selected)):
                 with self.lock:
                     item = self.jobs[context.job_id]["items"][index]
                     item.update({
@@ -986,18 +1085,38 @@ class BatchManager:
 
             def progress(stage: str, fraction: float, detail: str) -> None:
                 self._checkpoint(context)
+                if stage in {"separating", "waiting_for_server"}:
+                    with self.lock:
+                        fraction = max(fraction, self.jobs[context.job_id]["items"][index]["progress"])
                 self._update_item(
                     context.job_id, index, stage=stage,
                     progress=fraction, detail=detail,
                 )
 
+            def separation_state(payload: dict) -> None:
+                self._checkpoint(context)
+                stage = ("waiting_for_server" if payload["state"] == "waiting_for_server"
+                         else "separating")
+                with self.lock:
+                    fraction = self.jobs[context.job_id]["items"][index]["progress"]
+                self._update_item(
+                    context.job_id, index, stage=stage, progress=fraction,
+                    detail=str(payload.get("detail") or "Separating audio"), force=True,
+                )
+
             provider = BatchStemProvider(
-                self.separator, lambda: self._checkpoint(context), progress,
+                self.separator, lambda: self._checkpoint(context), progress, separation_state,
             )
+            export_options = {
+                "stem_provider": provider,
+                "progress_cb": progress,
+                "cancel_cb": lambda: self._checkpoint(context),
+                "log": self.log,
+            }
+            if self.ffmpeg_resolver is not None:
+                export_options["ffmpeg_resolver"] = self.ffmpeg_resolver
             result = self.exporter.export_minus_mix(
-                source, output_dir, context.selected,
-                stem_provider=provider, progress_cb=progress,
-                cancel_cb=lambda: self._checkpoint(context), log=self.log,
+                source, output_dir, context.selected, **export_options,
             )
             with self.lock:
                 item = self.jobs[context.job_id]["items"][index]
@@ -1025,12 +1144,18 @@ class BatchManager:
             if context.event.is_set():
                 self._mark_item_canceled(context, index)
                 return False
+            blocked = _service_block(exc)
+            if blocked is not None:
+                self._mark_item_blocked(context, index, blocked)
+                return False
             self._mark_item_failed(context, index, relative_value, exc)
             return True
 
     def _finish_run(self, context: BatchRunContext) -> None:
         with self.lock:
             job = self.jobs[context.job_id]
+            if job["status"] == "blocked":
+                return
             if context.event.is_set():
                 for index, item in enumerate(job["items"]):
                     if item["status"] != "queued":

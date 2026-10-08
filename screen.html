@@ -17,6 +17,7 @@
   <div class="pmx-tabs" role="tablist" aria-label="Export mode">
     <button id="pmx-mode-single" class="pmx-tab active" type="button" role="tab" aria-selected="true" aria-controls="pmx-single-panel" tabindex="0">Single song</button>
     <button id="pmx-mode-batch" class="pmx-tab" type="button" role="tab" aria-selected="false" aria-controls="pmx-batch-panel" tabindex="-1">Batch folder</button>
+    <button id="pmx-mode-reuse" class="pmx-tab" type="button" role="tab" aria-selected="false" aria-controls="pmx-reuse-panel" tabindex="-1">Reuse existing MinusMix audio</button>
   </div>
 
   <div id="pmx-single-panel" role="tabpanel" aria-labelledby="pmx-mode-single">
@@ -137,7 +138,7 @@
         <details class="pmx-advanced">
           <summary>Advanced skip settings</summary>
           <div class="pmx-options">
-            <label class="pmx-option"><input id="pmx-batch-skip-existing" type="checkbox" checked> Skip outputs already created</label>
+            <label class="pmx-option"><input id="pmx-batch-skip-existing" type="checkbox" checked> Skip matching stem-sum outputs</label>
             <label class="pmx-option"><input id="pmx-batch-skip-derived" type="checkbox" checked> Skip songs already produced by MinusMix</label>
           </div>
         </details>
@@ -176,10 +177,56 @@
     </section>
   </div>
 
+  <div id="pmx-reuse-panel" role="tabpanel" aria-labelledby="pmx-mode-reuse" hidden>
+    <section class="pmx-batch-intro">
+      <h2>Keep finished audio with your current charts</h2>
+      <p>Create new FeedPaks using audio already saved in older MinusMix packages. A mixed folder can contain No Guitar, No Vocals, or combined variants. Each compatible removed-stem combination becomes a separate output, named from its saved MinusMix metadata. Charts and other song files come from your current packages. Audio is copied without another separation or encode.</p>
+      <p class="pmx-help">Matching compares song identity and playable note timing. Older packages do not identify the original recording by audio hash, so review version choices before creating files.</p>
+    </section>
+    <section class="pmx-card"><div class="pmx-step">1</div><div class="pmx-content">
+      <label for="pmx-reuse-old">Existing MinusMix packages</label>
+      <div class="pmx-row"><input id="pmx-reuse-old" type="text" readonly placeholder="Choose a folder with finished MinusMix variants"><button id="pmx-reuse-old-browse" class="pmx-button pmx-secondary" type="button">Choose folder…</button></div>
+      <p class="pmx-help">Variants are detected automatically. Different recordings of the same variant require a choice. Missing or invalid removed-stem metadata is reported for review.</p>
+    </div></section>
+    <section class="pmx-card"><div class="pmx-step">2</div><div class="pmx-content">
+      <label for="pmx-reuse-fresh">Current original packages</label>
+      <div class="pmx-row"><input id="pmx-reuse-fresh" type="text" readonly placeholder="Choose the folder with your current charts"><button id="pmx-reuse-fresh-browse" class="pmx-button pmx-secondary" type="button">Choose folder…</button></div>
+    </div></section>
+    <section class="pmx-card"><div class="pmx-step">3</div><div class="pmx-content">
+      <label for="pmx-reuse-output">New output folder</label>
+      <div class="pmx-row"><input id="pmx-reuse-output" type="text" readonly placeholder="Choose a separate output folder"><button id="pmx-reuse-output-browse" class="pmx-button pmx-secondary" type="button">Choose folder…</button></div>
+      <p class="pmx-help">Both input folders are scanned recursively. Inputs stay unchanged; verified existing outputs are counted as already complete and never overwritten.</p>
+      <label for="pmx-reuse-layout">Output folder structure</label>
+      <select id="pmx-reuse-layout" aria-describedby="pmx-reuse-layout-help"><option value="preserve" selected>Preserve source subfolders (default)</option><option value="flat">Single output folder</option></select>
+      <p id="pmx-reuse-layout-help" class="pmx-help">Recreate subfolders from Current original packages inside the output folder.</p>
+      <label for="pmx-reuse-workers">Maximum parallel jobs</label>
+      <select id="pmx-reuse-workers"><option value="auto">Auto</option><option>1</option><option>2</option><option>3</option><option>4</option><option>5</option><option>6</option><option>7</option><option>8</option><option>9</option><option>10</option><option>11</option><option>12</option><option>13</option><option>14</option><option>15</option><option>16</option></select>
+      <p id="pmx-reuse-resources" class="pmx-help"></p>
+    </div></section>
+    <section class="pmx-summary">
+      <div><strong id="pmx-reuse-headline">Choose your three folders</strong><p id="pmx-reuse-detail"></p></div>
+      <div class="pmx-actions"><button id="pmx-reuse-scan" class="pmx-button pmx-secondary" type="button" disabled>Scan and review</button><button id="pmx-reuse-apply" class="pmx-button pmx-primary" type="button" disabled>Create reviewed FeedPaks</button><button id="pmx-reuse-resume" class="pmx-button pmx-primary" type="button" disabled hidden>Resume remaining files</button></div>
+    </section>
+    <div id="pmx-reuse-status" class="pmx-status" role="status" aria-live="polite"></div>
+    <section class="pmx-batch-progress">
+      <div class="pmx-progress-heading"><strong id="pmx-reuse-counts" aria-live="polite"></strong><div class="pmx-actions"><button id="pmx-reuse-refresh" class="pmx-button pmx-secondary" type="button">Refresh</button><button id="pmx-reuse-cancel" class="pmx-button pmx-danger" type="button" hidden>Cancel safely</button></div></div>
+      <div id="pmx-reuse-phase" class="pmx-reuse-phase" hidden>
+        <div class="pmx-reuse-phase-heading" role="status" aria-live="polite"><strong id="pmx-reuse-phase-label"></strong><span id="pmx-reuse-phase-count"></span></div>
+        <p id="pmx-reuse-phase-metrics" class="pmx-help" aria-live="off"></p>
+      </div>
+      <progress id="pmx-reuse-bar" max="1" value="0" aria-label="Existing-audio reuse progress"></progress>
+      <div id="pmx-reuse-groups" aria-label="Audio versions requiring a choice"></div>
+      <div id="pmx-reuse-items" class="pmx-batch-items"></div>
+      <div class="pmx-reuse-pagination"><button id="pmx-reuse-previous" class="pmx-button pmx-secondary" type="button" disabled>Previous 100</button><span id="pmx-reuse-page"></span><button id="pmx-reuse-next" class="pmx-button pmx-secondary" type="button" disabled>Next 100</button></div>
+      <details id="pmx-reuse-errors-wrap" hidden><summary>Sources that could not be inspected</summary><div id="pmx-reuse-errors"></div></details>
+    </section>
+  </div>
+
   <details class="pmx-details">
     <summary>How the audio is made</summary>
-    <p>For a normal single-stem source, this optional plugin connects directly to the managed local server you started from Stem Splitter and downloads the selected audio into a temporary workspace. Remote/custom servers, Docker sidecars and Stem Splitter's in-app engines are not supported yet. MinusMix subtracts that temporary stem from the original full mix, encodes once to Ogg Vorbis, and deletes the whole temporary separation. It never adds those stems to your original package.</p>
-    <p>If the source already contains the selected stem, MinusMix reuses it and skips the server. Charts, lyrics, artwork and metadata are copied into a new FeedPak containing only the rendered full mix.</p>
+    <p>MinusMix combines the separated instrument stems you keep into one backing track. For No Guitar, it mixes bass, drums, vocals, piano and other. The original recording and excluded stems are never added to this mix.</p>
+    <p>A complete saved six-stem set can be reused without the server. Otherwise MinusMix requests a complete set from Stem Splitter's managed local server. It checks timing, preserves relative stem levels, and reduces the whole mix only when needed to prevent clipping. Charts, lyrics, artwork and metadata are copied into a new FeedPak. Temporary audio is deleted after each export.</p>
+    <p>Older subtraction-based exports remain untouched. Batch conversion creates numbered replacements and skips only matching exports made with the current mixing method. Reusing existing audio copies its original sound; it does not improve old guitar removal.</p>
     <p>Batch mode runs one GPU separation at a time for stability. Each song's temporary separation is deleted before the next song, while engines that support a persistent model can keep the model itself warm between songs.</p>
     <p>AI separation is not mathematically perfect: faint bleed can remain, and sounds incorrectly placed in an excluded stem can also be reduced.</p>
   </details>

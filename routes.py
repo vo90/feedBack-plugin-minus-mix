@@ -65,7 +65,7 @@ def _public_batch(payload: dict | None, *, scan: bool = False) -> dict | None:
         selected: set[int] = set()
 
         # A running row must never disappear just because it is outside the
-        # trailing results window. Failed rows are next in priority because
+        # trailing results window. Blocked and failed rows are next in priority because
         # they contain the information a user can act on.
         for index, item in enumerate(items):
             if item.get("status") == "running":
@@ -73,7 +73,7 @@ def _public_batch(payload: dict | None, *, scan: bool = False) -> dict | None:
         for index in range(len(items) - 1, -1, -1):
             if len(selected) >= MAX_PUBLIC_BATCH_ITEMS:
                 break
-            if items[index].get("status") == "failed":
+            if items[index].get("status") in ("blocked", "failed"):
                 selected.add(index)
 
         # Fill the remaining bounded view with the end of the queue. Sorting
@@ -100,6 +100,7 @@ class MinusMixAPI:
         single_module: Any,
         separator_module: Any,
         separator: Any,
+        ffmpeg_resolver: Any,
         batch_manager: Any,
         single_manager: Any,
         log: Any,
@@ -111,12 +112,24 @@ class MinusMixAPI:
         self.single_module = single_module
         self.separator_module = separator_module
         self.separator = separator
+        self.ffmpeg_resolver = ffmpeg_resolver
         self.batch_manager = batch_manager
         self.single_manager = single_manager
         self.log = log
         self.get_dlc_dir = get_dlc_dir
         self.meta_db = meta_db
         self.operation_start_lock = threading.RLock()
+        self.reuse_manager = None
+
+    def _require_reuse_idle(self):
+        if self.reuse_manager is not None and self.reuse_manager.is_active():
+            raise HTTPException(409, "Wait for existing-audio reuse to finish or cancel it first")
+
+    def _require_ffmpeg(self) -> str:
+        try:
+            return self.ffmpeg_resolver.require_verified()
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc)) from exc
 
     @staticmethod
     def _batch_options(body: dict) -> BatchRequestOptions:
@@ -183,10 +196,15 @@ class MinusMixAPI:
         )
 
     def status(self):
-        from audio import _ffmpeg_cmd
-
         engine = self.separator.status()
-        return {"ok": True, "ffmpeg_available": bool(_ffmpeg_cmd()), "separation": engine}
+        media = self.ffmpeg_resolver.public_status()
+        return {
+            "ok": True,
+            "ffmpeg_available": media["available"],
+            "ffmpeg_source": media["source"],
+            "ffmpeg_reason": media["reason"],
+            "separation": engine,
+        }
 
     def sources(self, q: str = ""):
         if self.meta_db is None:
@@ -245,7 +263,7 @@ class MinusMixAPI:
         supported = list(
             getattr(self.separator_module, "SUPPORTED_STEMS", DEFAULT_TARGETS)
         )
-        target_ids = list(dict.fromkeys([*supported, *saved.keys()]))
+        target_ids = supported
         return {
             "filename": filename,
             "title": info.title,
@@ -261,6 +279,9 @@ class MinusMixAPI:
                 for stem_id in target_ids
             ],
             "already_split": bool(saved),
+            "mix_stems": list(self.exporter.MIX_STEMS),
+            "complete_saved_stems": set(self.exporter.MIX_STEMS).issubset(saved)
+                and not (set(saved) - set(self.exporter.MIX_STEMS)),
             "arrangements": list(info.arrangements),
             "derived_exclusions": list(info.derived_exclusions),
         }
@@ -287,6 +308,8 @@ class MinusMixAPI:
         source_path = self._resolve_source(body.get("filename"))
         try:
             with self.operation_start_lock:
+                self._require_ffmpeg()
+                self._require_reuse_idle()
                 if self.batch_manager.is_active():
                     raise self.single_module.SingleExportError(
                         "wait for the active MinusMix batch to finish or cancel it first"
@@ -294,6 +317,8 @@ class MinusMixAPI:
                 return self.single_manager.start(source_path, output_dir, excluded)
         except (self.exporter.ExportError, self.single_module.SingleExportError) as exc:
             raise HTTPException(400, str(exc)) from exc
+        except HTTPException:
+            raise
         except PermissionError as exc:
             raise HTTPException(403, "the app cannot write to the chosen output folder") from exc
         except Exception as exc:
@@ -374,6 +399,8 @@ class MinusMixAPI:
         self._require_loopback(request, "batch conversion is only available on this computer")
         try:
             with self.operation_start_lock:
+                self._require_ffmpeg()
+                self._require_reuse_idle()
                 if self.single_manager.is_active():
                     raise self.batch_module.BatchError(
                         "wait for the active single-song export to finish or cancel it first"
@@ -429,9 +456,15 @@ def setup(app: FastAPI, context: dict) -> None:
     batch_module = context["load_sibling"]("batch")
     single_module = context["load_sibling"]("single")
     separator_module = context["load_sibling"]("separator_client")
+    media_tools_module = context["load_sibling"]("media_tools")
     log = context["log"]
     config_dir = Path(context["config_dir"])
-    separator = separator_module.SeparationClient(config_dir, log)
+    from audio import _ffmpeg_cmd
+
+    ffmpeg_resolver = media_tools_module.FFmpegResolver(config_dir, _ffmpeg_cmd)
+    separator = separator_module.SeparationClient(
+        config_dir, log, ffmpeg_resolver=ffmpeg_resolver.resolve,
+    )
 
     api = MinusMixAPI(
         exporter=exporter,
@@ -439,11 +472,29 @@ def setup(app: FastAPI, context: dict) -> None:
         single_module=single_module,
         separator_module=separator_module,
         separator=separator,
-        batch_manager=batch_module.BatchManager(exporter, separator, config_dir, log),
-        single_manager=single_module.SingleExportManager(exporter, separator, log),
+        ffmpeg_resolver=ffmpeg_resolver,
+        batch_manager=batch_module.BatchManager(
+            exporter, separator, config_dir, log, ffmpeg_resolver=ffmpeg_resolver.resolve,
+        ),
+        single_manager=single_module.SingleExportManager(
+            exporter, separator, log, ffmpeg_resolver=ffmpeg_resolver.resolve,
+        ),
         log=log,
         get_dlc_dir=context.get("get_dlc_dir"),
         meta_db=context.get("meta_db"),
     )
     api.register(app)
+    reuse_module = context["load_sibling"]("reuse_batch")
+    reuse_match = context["load_sibling"]("reuse_match")
+    api.reuse_manager = reuse_module.ReuseManager(
+        match=reuse_match,
+        packing=context["load_sibling"]("reuse_export"),
+        exporter=exporter,
+        support=context["load_sibling"]("reuse_support"),
+        config_dir=config_dir,
+        log=log,
+    )
+    context["load_sibling"]("reuse_routes").register(
+        app, api=api, manager=api.reuse_manager, error_type=reuse_match.ReuseError,
+    )
     log.info("minus_mix: routes registered")
