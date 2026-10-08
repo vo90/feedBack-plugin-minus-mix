@@ -76,7 +76,8 @@
 .practice-mix-exporter input:focus, .practice-mix-exporter select:focus {
   outline: 2px solid rgba(96,165,250,.55); outline-offset: 1px;
 }
-.practice-mix-exporter select { display: block; margin-top: .55rem; min-height: 9.2rem; }
+.practice-mix-exporter select { display: block; margin-top: .55rem; }
+.practice-mix-exporter #pmx-source { min-height: 9.2rem; }
 .practice-mix-exporter select option { padding: .35rem .45rem; }
 .practice-mix-exporter .pmx-button {
   flex: 0 0 auto; border: 0; border-radius: 7px; padding: .52rem .85rem;
@@ -166,6 +167,18 @@
 .practice-mix-exporter .pmx-batch-item div { min-width: 0; overflow-wrap: anywhere; }
 .practice-mix-exporter .pmx-batch-item small { display: block; color: #94a3b8; }
 .practice-mix-exporter .pmx-details { margin-top: 1rem; color: #94a3b8; }
+.practice-mix-exporter [hidden] { display: none !important; }
+.practice-mix-exporter .pmx-tabs { flex-wrap: wrap; }
+.practice-mix-exporter #pmx-reuse-workers { max-width: 14rem; }
+.practice-mix-exporter #pmx-reuse-layout { max-width: 28rem; }
+.practice-mix-exporter .pmx-reuse-phase { margin-top: .75rem; }
+.practice-mix-exporter .pmx-reuse-phase-heading { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: .35rem 1rem; }
+.practice-mix-exporter #pmx-reuse-phase-count { color: #cbd5e1; font-size: .85rem; font-variant-numeric: tabular-nums; }
+.practice-mix-exporter #pmx-reuse-phase-metrics { margin: .35rem 0 0; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.practice-mix-exporter .pmx-reuse-choice { padding: .8rem; margin-bottom: .8rem; border: 1px solid #94763c; border-radius: 8px; }
+.practice-mix-exporter .pmx-reuse-choice select { margin: .4rem 0; }
+.practice-mix-exporter .pmx-reuse-pagination { display: flex; align-items: center; justify-content: space-between; gap: .5rem; margin-top: .8rem; flex-wrap: wrap; }
+.practice-mix-exporter #pmx-reuse-errors { max-height: 220px; overflow: auto; overflow-wrap: anywhere; }
 .practice-mix-exporter .pmx-details summary { color: #cbd5e1; cursor: pointer; font-weight: 650; }
 @media (max-width: 650px) {
   .practice-mix-exporter { padding-inline: .85rem; }

@@ -15,6 +15,7 @@ several of them together. It works on one song at a time or on a whole folder.
 - [What you need](#what-you-need)
 - [Install MinusMix](#install-minusmix)
 - [Create your first MinusMix song](#create-your-first-minusmix-song)
+- [Reuse existing MinusMix audio](#reuse-existing-minusmix-audio)
 - [Troubleshooting](#troubleshooting)
 - [Technical details](#technical-details)
 
@@ -41,14 +42,96 @@ The separation is produced by an AI audio model, so it will not be perfect on
 every recording. Faint bleed or small changes to other sounds can remain. This
 is normal for source separation and does not affect the original song.
 
+## Reuse existing MinusMix audio
+
+After reconverting or repairing your ordinary FeedPaks, open **Reuse existing MinusMix audio**
+in MinusMix. Choose three separate, non-overlapping folders: your existing MinusMix
+FeedPaks, the fresh ordinary FeedPaks, and a new output folder. Scan and review the
+matches, then create the new copies. Both input folders remain read-only.
+
+Both input folders are scanned recursively. **Output folder structure** defaults
+to **Preserve source subfolders**, keeping subfolders relative to the selected
+**Current original packages** folder. For example, `Artist/Album/Song.feedpak`
+becomes `Artist/Album/Song (No Guitar).feedpak` inside the output folder. Choose
+**Single output folder** to put every resulting FeedPak directly in that folder.
+Clashing filenames receive numbered suffixes in the preview. Changing this choice
+requires a new scan; it does not move files created with an earlier layout.
+
+A repeat scan with the same layout verifies
+existing outputs and counts exact matches as **already complete**. Only remaining
+ready files need Apply; the summary reports created files separately from already
+complete ones. Different or damaged existing outputs are reported as conflicts
+and are never overwritten.
+
+The existing folder can mix any supported removed-stem combinations: No Guitar,
+No Vocals, No Guitar + Vocals, and others. Scan reads each donor's saved MinusMix
+metadata automatically; there is no batch-wide stem selection. Each compatible
+combination produces a separate output with the normal MinusMix title and filename
+suffix. The review shows its variant and counts input song packages separately
+from output variants. Missing or invalid removed-stem metadata is reported, not
+guessed from a filename.
+
+This mode copies the existing finished backing track and its preview byte-for-byte.
+It uses the fresh package's charts, artwork, lyrics and other assets. It never starts
+Stem Splitter or re-encodes audio. A donor with no preview produces an output with
+no preview. Fresh packages already marked as derived mixes are skipped.
+
+Matching compares the artist/title, available album/year information, duration,
+offsets, tuning/capo and the complete collection of sounding-note timelines.
+Bend curves, per-note sustain, chord/display representation, beat numbering,
+anchors, difficulty layout and corrected arrangement labels may differ after
+conversion fixes. Filenames alone never establish a match. Exported songs from
+RS1 compilation archives work the same way as other FeedPaks; select their exported
+folder, not the PSARC file. One donor can supply several matching fresh packages.
+
+Different compatible backing tracks for the same removed-stem combination appear
+as recording choices. Choose once for that variant's matching targets, or skip
+that group. Identical audio/preview copies collapse within the same variant;
+different removed-stem combinations remain separate even when their bytes match.
+Unreadable donors are reported; automatic uniqueness means uniqueness
+among the readable compatible donors. Legacy MinusMix packages do not contain an
+original-recording hash, so these checks establish chart/timing compatibility,
+not cryptographic proof of the recording master. Materially changed or insufficient
+charts are left unmatched for review.
+
+**Auto** chooses a conservative worker count for the machine. You can request 1–16
+workers; CPU, available memory and storage impose an explicit effective limit.
+Progress shows the effective count. Copies stream directly between archives and
+do not accumulate separated stems or decoded audio in a cache. Available disk
+space and memory are checked before more work starts.
+
+Progress works the same way for every library size. It shows the current phase:
+finding input files, reading existing mixes, reading current packages, checking
+outputs, or creating FeedPaks. Once a phase's total is known, the bar shows
+processed files out of the total and a percentage. File discovery uses an
+indeterminate bar while it counts files. Phase elapsed time and files per second
+are shown, with approximate time remaining for that phase once enough work has
+completed to estimate it. The estimate is not a whole-job completion time: phases
+read different amounts of data. Each phase and each resumed Apply starts its own
+measurement. Finished or stopped phases retain their elapsed time without a live
+countdown. Saved jobs from older versions keep their existing counters until a
+new scan or Apply provides phase measurements.
+
+Cancel stops at copy checkpoints and preserves finished outputs. After restarting
+the app, use **Resume** to verify completed copies and continue unfinished ones.
+Inputs changed since the preview require a new scan. Existing different output
+files are never replaced. Output manifests retain content hashes and a reuse receipt;
+edited outputs are reported instead of being overwritten. A new scan replaces the
+previous job's saved review, so resume that job before starting another scan.
+
+Previews saved by the earlier No Guitar-only reuse version require one new scan.
+They are not resumed as mixed-variant jobs. Their saved records are retained, and
+existing source packages and output files are preserved.
+
 ## Why use MinusMix instead of muting a stem?
 
 A fully split song gives you more control, but it also stores several
 full-length audio tracks and mixes them during playback. MinusMix creates a
 smaller, ready-to-play practice copy with your chosen instrument already
 removed. It uses less disk space, has less audio to load, always opens with the
-same mix, and may preserve more of the original sound than rebuilding the song
-from the remaining separated tracks.
+same mix. It combines the remaining separated tracks, matching the balance of
+those stems with the excluded instruments muted (apart from encoding and any
+constant reduction needed to prevent clipping).
 
 On my own system, I have also noticed a clear improvement in playback latency
 when using a normal single-track song instead of a multi-stem song, particularly
@@ -60,7 +143,7 @@ different.
 - The **FeedBack desktop app**.
 - The **Stem Splitter** plugin available in your FeedBack installation.
 - Stem Splitter's **managed local server and models** for songs that do not
-  already contain the selected stem audio.
+  already contain a complete six-stem set.
 - Enough free disk space for Stem Splitter's one-time server/model installation.
   The download is several gigabytes.
 
@@ -75,10 +158,13 @@ before using MinusMix:
 1. Open **Settings** in FeedBack and find **Stem Splitter**.
 2. Find the **Local demucs server** section marked “recommended — start here.”
 3. On first use, select **Install server + models (~5 GB)** and wait for it to
-   finish. This is a one-time setup.
+   finish. This is a one-time setup. The managed installation also provides a
+   verified FFmpeg/FFprobe pair that MinusMix can use when a development build
+   of FeedBack does not include the desktop app's bundled FFmpeg.
 4. If it is already installed but stopped, select **Start server**.
-5. Open MinusMix. Its status should say that the managed local Stem Splitter
-   server is ready. Use **Refresh status** if needed.
+5. Open MinusMix. Its status should say that the local server is ready or that
+   the model loads when needed. Status refreshes automatically while MinusMix
+   is open; **Refresh status** also checks immediately.
 
 The first installation and model warm-up can take a while. A supported NVIDIA
 GPU makes separation much faster, but Stem Splitter can also run on the CPU.
@@ -86,6 +172,26 @@ GPU makes separation much faster, but Stem Splitter can also run on the CPU.
 MinusMix currently supports only this managed local server. Stem Splitter's
 remote/custom servers, Docker server, and in-app engines are not used by
 MinusMix. You do not need to configure any of those options.
+
+### Server updates and restarts
+
+MinusMix supports both the older local server used with Nightly and the updated
+managed server. You do not need to update the server just to use MinusMix.
+Server, model and dependency updates remain the responsibility of Stem Splitter;
+MinusMix checks the local server's public API and available outputs instead of
+requiring a particular server version or graphics card.
+
+If the server is updating or temporarily disconnects during an export, MinusMix
+shows **Waiting for the stem server** and continues automatically when possible.
+The current song stays active and later batch songs stay queued. You can cancel
+while it waits. If the selected model is missing, the server endpoint changes,
+or recovery takes too long, the job stops with an **action needed** message.
+After fixing the problem in Stem Splitter, scan and start the unfinished work
+again; keep **Skip outputs already created** enabled to preserve completed batch copies.
+
+An older server's skipped startup loading means the model can load on the first
+export. A newer server can also verify that the model files are installed without
+loading them at startup. Neither state requires an earlier Stem Splitter song job.
 
 ## Install MinusMix
 
@@ -184,10 +290,11 @@ you cancel, and existing files are not overwritten.
 | What you see | What to do |
 | --- | --- |
 | “Managed local server is not running” | Open **Settings → Stem Splitter**, find **Local demucs server**, and select **Start server**. Return to MinusMix and select **Refresh status**. |
-| Models are downloading or warming up | Wait for Stem Splitter to report that the models are ready. The first setup takes longer than later uses. |
-| The server is busy | Wait for its current job to finish, then try again. Batch mode already runs one separation at a time. |
-| Connection lost or separation interrupted | Restart the managed local server and retry. Your source song was not changed. |
-| **Create MinusMix FeedPak** is disabled | Select a song, at least one instrument, and an output folder. If separation is needed, also make sure the server status is ready. |
+| Models are downloading or warming up | An accepted export waits automatically. The first setup takes longer than later uses. |
+| The server is busy or updating | Leave the export running to continue automatically, or cancel. Later batch songs remain queued. |
+| Connection lost or separation interrupted | MinusMix reconnects to the same local server. If it stops with an action-needed message, check Stem Splitter and retry unfinished work. |
+| The selected model or instrument is unavailable | Install/select a suitable model in Stem Splitter. MinusMix does not silently substitute another model. |
+| **Create MinusMix FeedPak** or **Start batch** is disabled | Read the summary beside the button. Select the required song/folders and instrument. Resolve any model/server message. If it reports FFmpeg unavailable, install or update Stem Splitter's managed server, or repair the FeedBack desktop app. |
 | MinusMix cannot write to the output folder | Choose another existing folder that your user account can write to, such as a folder inside Documents. |
 | A song is not listed | Make sure it is a local `.feedpak` or `.sloppak`, then select **Refresh** beside the song search. |
 | Some instrument sound remains | AI separation is an estimate. Bleed is more likely when instruments overlap heavily in the original recording. |
@@ -218,9 +325,9 @@ ignored.
 
 ### Do I always need the server?
 
-No. If the song already contains the selected stem audio, MinusMix reuses it
-and does not contact the server. If you are unsure, starting the server is the
-simplest option.
+No. If the song already contains all six instrument stems, MinusMix reuses
+the retained stems and does not contact the server. If you are unsure, starting
+the server is the simplest option.
 
 ### Can I remove more than one instrument?
 
@@ -233,29 +340,46 @@ completed output that has already been published is kept.
 
 ## Technical details
 
-For selected stems `S`, the rendered backing is:
+For excluded instruments `S`, the rendered backing is:
 
 ```text
-MinusMix output = original full mix - sum(S)
+MinusMix output = sum(all six instrument stems except S)
+No Guitar = bass + drums + vocals + piano + other
+No Guitar + Vocals = bass + drums + piano + other
 ```
 
-For an ordinary single-stem source, MinusMix calls the public HTTP API of Stem
-Splitter's managed loopback server. It requests the selected stems into a
-caller-owned temporary directory. The server may calculate all six sources
-internally, but MinusMix downloads only recognised requested outputs and never
-writes them into the source FeedPak.
+Neither the original full mix nor the excluded stems enter the rendering graph.
+This avoids the residual guitar caused by subtracting server-normalized stems
+from a louder original recording. Guitar bleed already present in a retained
+stem can remain, just as it does when muting guitar in Stem Splitter playback.
 
-If the source already contains the selected stems, MinusMix takes a server-free
-fast path. Otherwise, requested audio is streamed into the temporary workspace
-rather than buffered in memory. After the download, MinusMix asks the server to
-delete that job's result cache; server TTL cleanup remains a fallback. The whole
-temporary separation directory is deleted after export.
+A complete saved six-stem set uses no server. Otherwise MinusMix requests all six
+sources from the public HTTP API of Stem Splitter's managed loopback server.
+This verifies that the model actually separates the excluded instruments, too.
+A partial saved set is never combined with a new separation. Missing, ambiguous,
+corrupt or incompatible stems cause an explicit error; there is no subtraction
+fallback. Keep at least one instrument selected for inclusion.
 
-The subtraction happens on decoded audio in FFmpeg. The playable mix and its
-optional preview are normally rendered together from one decode graph. An
-independent preview fallback preserves compatibility without failing the main
-export. The manifest is rewritten to one `full` stem, and the preview is rebuilt
-from the new audio.
+FFmpeg fully decodes the retained stems, verifies their durations, converts sample
+rates and mono/stereo channels to the source format, and sums them at unity gain into
+a temporary floating-point WAV. It does not average the inputs or normalize each
+stem. One constant gain reduction is applied only if needed for clipping safety.
+At most 1 ms of codec/resampling rounding is padded or trimmed at the tail; larger
+duration mismatches fail. The encoded output is checked again for duration and
+peaks. The preview comes from the same retained mix. A complete saved set
+can also be used when there is no original full mix in the package.
+
+Downloads are streamed and interrupted files restart from byte zero. Shared
+server results remain under the server's cache retention policy. All local
+intermediates are removed after each song, including failures and cancellation.
+
+New exports record `render_method: retained_stem_sum`, a render version, included
+and excluded stems, the source package fingerprint and the applied gain. With
+skip-existing enabled, batch mode skips only matching current-method exports.
+Legacy exports, changed sources and other filename collisions receive a new
+numbered output; nothing is overwritten. Regenerate old MinusMix songs from
+the original sources. The separate audio-reuse feature preserves a donor's
+existing audio and rendering provenance; copying old audio does not upgrade it.
 
 Every arrangement, lyric track, rig, cover and other non-stem asset is copied
 into the new package. Applying MinusMix repeatedly to an already derived output
@@ -270,17 +394,36 @@ is discouraged because each generation includes another lossy audio encode.
 - Verifies output-folder writability before separation or rendering begins.
 - Accepts output-folder writes only from a loopback client.
 - Sends separation requests only to Stem Splitter's managed loopback server.
+- Uses FeedBack's bundled FFmpeg when present. Otherwise it accepts only the
+  active Stem Splitter generation's contained canonical FFmpeg/FFprobe pair
+  after checking its owner, manifest binding, platform, sizes and SHA-256
+  receipts; it never adds that directory to global `PATH`.
 - Uses the desktop shell's native directory chooser.
 
 ### Compatibility and server scope
 
-- Compatible with the current main/nightly managed local Stem Splitter HTTP
-  contract.
-- Converting an unsplit FeedPak requires the managed local server to be running
-  and ready.
-- A FeedPak with the selected saved stems does not require the server.
+- Supports the older local HTTP contract and managed runtime schema 1 with
+  verified model capabilities. No server/plugin version number is pinned.
+- Compatible server/model/dependency updates do not require a MinusMix update.
+  A future breaking public API change may require a client update.
+- Converting an unsplit FeedPak requires the selected local server and requested
+  model outputs; temporary startup/update states can wait automatically.
+- A FeedPak with a complete saved six-stem set does not require the server.
 - Remote/custom servers, Docker sidecars and Stem Splitter's in-app engines are
   outside the current MinusMix support scope.
+
+Each separation keeps its original endpoint, logical model and input. It tries
+to retrieve an accepted result after a restart even if the replacement runtime
+no longer includes that model. Lost or incomplete results permit at most one
+recomputation; updated weights may be used for the whole replacement attempt.
+Stems from separate attempts are never combined. A lost upload response can
+cause extra server computation because the API has no durable idempotency key,
+but MinusMix publishes only one completed local output per export.
+
+Recovery has a cumulative 35-minute allowance, separate from a 35-minute useful
+processing allowance, with a 70-minute total limit. These are maximums; work
+continues as soon as the server recovers. Cancel is checked during waits and
+streaming; a currently blocked network call must reach its bounded timeout first.
 
 ### Batch implementation
 

@@ -23,7 +23,7 @@ def _pak(path: Path, *, full: bytes = b"same full audio", guitar: bool = False,
     path.parent.mkdir(parents=True, exist_ok=True)
     stems = [{"id": "full", "file": "stems/full.ogg"}]
     if guitar:
-        stems.append({"id": "guitar", "file": "stems/guitar.ogg"})
+        stems.extend({"id": stem, "file": f"stems/{stem}.ogg"} for stem in exporter.MIX_STEMS)
     manifest = {"title": path.stem, "artist": "Test", "stems": stems}
     if derived:
         manifest["minus_mix"] = {
@@ -33,7 +33,8 @@ def _pak(path: Path, *, full: bytes = b"same full audio", guitar: bool = False,
         zf.writestr("manifest.yaml", yaml.safe_dump(manifest, sort_keys=False))
         zf.writestr("stems/full.ogg", full)
         if guitar:
-            zf.writestr("stems/guitar.ogg", b"guitar")
+            for stem in exporter.MIX_STEMS:
+                zf.writestr(f"stems/{stem}.ogg", stem.encode())
     return path
 
 
@@ -41,8 +42,23 @@ def _hash(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _completed(path, source, selected=("guitar",)):
+    manifest = {"stems": [{"id": "full", "file": "stems/full.ogg"}], "minus_mix": {
+        "generator": "minus_mix", "excluded_stems": list(selected),
+        "included_stems": [s for s in exporter.MIX_STEMS if s not in selected],
+        "render_method": exporter.RENDER_METHOD, "render_version": exporter.RENDER_VERSION,
+        "source_sha256": exporter.source_fingerprint(source),
+    }}
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("manifest.yaml", yaml.safe_dump(manifest))
+        archive.writestr("stems/full.ogg", b"fake decoded elsewhere" * 10)
+
+
 class FakeExporter:
     ExportError = exporter.ExportError
+    plan_stems = staticmethod(exporter.plan_stems)
+    source_fingerprint = staticmethod(exporter.source_fingerprint)
+    is_current_output = staticmethod(exporter.is_current_output)
     inspect_source = staticmethod(exporter.inspect_source)
     desired_output_path = staticmethod(exporter.desired_output_path)
     stem_label = staticmethod(exporter.stem_label)
@@ -53,8 +69,7 @@ class FakeExporter:
                          progress_cb, cancel_cb, log):
         cancel_cb()
         info = exporter.inspect_source(source)
-        saved = {stem.id for stem in info.stems}
-        missing = tuple(stem for stem in selected if stem not in saved)
+        missing = exporter.plan_stems(info, selected).requested
         if missing:
             with tempfile.TemporaryDirectory() as td:
                 work = Path(td)
@@ -76,7 +91,7 @@ class FakeExporter:
             target = wanted.with_name(f"{wanted.stem} ({number}){wanted.suffix}")
         else:
             raise AssertionError("fake exporter could not allocate an output name")
-        target.write_bytes(b"compact practice pak")
+        _completed(target, source, selected)
         return SimpleNamespace(
             output_path=target, output_filename=target.name,
             temporary_separation_used=bool(missing),
@@ -132,7 +147,7 @@ def test_recursive_scan_preserves_structure_and_skips_existing_derived_and_inval
     _pak(output_root / "old-output.feedpak")
     expected = exporter.desired_output_path(output_root / "Band", normal, ["guitar"])
     expected.parent.mkdir(parents=True, exist_ok=True)
-    expected.write_bytes(b"already done")
+    _completed(expected, normal)
 
     result = batch.scan_sources(
         exporter, str(source_root), str(output_root), ["guitar"],
@@ -202,6 +217,46 @@ def test_recursive_scan_and_batch_can_flatten_outputs_with_numbered_collisions(t
     )
     assert resumed["counts"]["ready"] == 0
     assert resumed["counts"]["skipped_existing"] == 2
+
+
+def test_batch_passes_injected_ffmpeg_resolver_to_each_export(tmp_path):
+    source_root = tmp_path / "sources"
+    output_root = tmp_path / "outputs"
+    output_root.mkdir()
+    _pak(source_root / "song.feedpak", guitar=True)
+    received = []
+
+    def managed_resolver():
+        return "C:/verified-tools/ffmpeg.exe"
+
+    class ResolverExporter(FakeExporter):
+        @staticmethod
+        def export_minus_mix(source, output_dir, selected, *, stem_provider,
+                             ffmpeg_resolver, progress_cb, cancel_cb, log):
+            received.append(ffmpeg_resolver)
+            assert ffmpeg_resolver() == "C:/verified-tools/ffmpeg.exe"
+            return FakeExporter.export_minus_mix(
+                source, output_dir, selected, stem_provider=stem_provider,
+                progress_cb=progress_cb, cancel_cb=cancel_cb, log=log,
+            )
+
+    manager = batch.BatchManager(
+        ResolverExporter(), FakeService(), tmp_path / "config",
+        SimpleNamespace(
+            exception=lambda *args, **kwargs: None,
+            warning=lambda *args, **kwargs: None,
+        ),
+        ffmpeg_resolver=managed_resolver,
+    )
+
+    completed = _wait(manager, manager.start(
+        input_dir=str(source_root), output_dir=str(output_root),
+        excluded_stems=["guitar"], recursive=True,
+        skip_existing=True, skip_derived=True,
+    )["id"])
+
+    assert completed["status"] == "completed"
+    assert received == [managed_resolver]
 
 
 def test_batch_releases_each_temporary_separation_before_the_next_item(tmp_path):
@@ -570,6 +625,70 @@ def test_batch_reserves_start_while_authoritative_scan_is_running(tmp_path):
     assert not worker.is_alive()
     assert started
     _wait(manager, started[0]["id"])
+
+
+@pytest.mark.parametrize("terminal_status", ["completed", "failed"])
+def test_batch_keeps_reservation_until_terminal_history_is_saved(
+    tmp_path, monkeypatch, terminal_status,
+):
+    source_root = tmp_path / "sources"
+    output_root = tmp_path / "outputs"
+    output_root.mkdir()
+    _pak(source_root / "one.feedpak", guitar=True)
+    log = SimpleNamespace(exception=lambda *args, **kwargs: None,
+                          warning=lambda *args, **kwargs: None)
+    manager = batch.BatchManager(FakeExporter(), FakeService(), tmp_path / "config", log)
+    options = dict(input_dir=str(source_root), output_dir=str(output_root),
+                   excluded_stems=["guitar"], skip_existing=False)
+    save_entered = threading.Event()
+    release_save = threading.Event()
+    worker_finished = threading.Event()
+    original_persist = manager._persist
+    original_run = manager._run
+
+    def delayed_terminal_save(force=False):
+        with manager.lock:
+            active = manager.jobs.get(manager.active_id, {})
+            terminal = active.get("status") == terminal_status
+        if force and terminal:
+            save_entered.set()
+            assert release_save.wait(5.0)
+        original_persist(force=force)
+
+    def run_and_signal(job_id):
+        try:
+            original_run(job_id)
+        finally:
+            worker_finished.set()
+
+    def fail_item(context, index):
+        raise RuntimeError("injected worker failure")
+
+    monkeypatch.setattr(manager, "_persist", delayed_terminal_save)
+    monkeypatch.setattr(manager, "_run", run_and_signal)
+    if terminal_status == "failed":
+        monkeypatch.setattr(manager, "_process_item", fail_item)
+    started = manager.start(**options)
+    try:
+        assert save_entered.wait(5.0)
+        assert manager.get(started["id"])["status"] == terminal_status
+        # The worker has published its outcome in memory, but its terminal
+        # history write is still pending. It must retain the queue reservation.
+        saved = json.loads(manager.state_file.read_text(encoding="utf-8"))["jobs"][0]
+        assert saved["status"] == "running"
+        assert manager.is_active()
+        with pytest.raises(batch.BatchError, match="already running"):
+            manager.start(**options)
+    finally:
+        release_save.set()
+        assert worker_finished.wait(5.0)
+
+    assert not manager.is_active()
+    assert manager.active_id is None
+    saved = json.loads(manager.state_file.read_text(encoding="utf-8"))["jobs"][0]
+    assert saved["status"] == terminal_status
+    restored = batch.BatchManager(FakeExporter(), FakeService(), tmp_path / "config", log)
+    assert restored.get(started["id"])["status"] == terminal_status
 
 
 def test_public_batch_snapshot_is_bounded_and_keeps_actionable_rows():

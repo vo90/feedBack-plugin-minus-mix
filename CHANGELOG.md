@@ -1,6 +1,48 @@
 # Changelog
 
-## Unreleased
+## 0.8.0 - 2026-10-08
+
+- Build backing tracks by summing retained stems instead of subtracting quieter
+  separated audio from the original. Multiple exclusions use the same rule.
+- Require a complete coherent six-stem set, validate decoded timelines and peaks,
+  and preserve dynamics with constant clipping attenuation only when necessary.
+- Record the render method and source identity. Batch scans preserve legacy
+  exports and create numbered replacements instead of silently skipping them.
+
+- Reuse Stem Splitter's active receipt-verified managed FFmpeg pair when a
+  source-based FeedBack runtime has no bundled FFmpeg. Batch and single-song
+  controls now show the exact FFmpeg blocker and remain fail-closed until it is
+  verified.
+- Replace decoded audio timestamps with the exact rendered sample timeline
+  before Vorbis encoding, preventing backward Ogg packet timestamps from some
+  otherwise valid source encoders in both the full mix and preview.
+- Support older Nightly local stem servers and managed servers with verified
+  models, including intentionally skipped startup loading, without pinning a
+  server version or requiring a server upgrade.
+- Reconnect through local server updates/restarts, resume retained results and
+  safely retry interrupted audio downloads. Pin the selected endpoint and model;
+  permit one recovery recomputation without combining different attempts.
+- Keep single exports active while waiting and preserve later batch rows. Shared
+  service problems produce a clear blocked outcome instead of failing the queue.
+- Refresh readiness automatically, check the required stem set, and retain
+  job polling through navigation/retry races. Saved-stem and audio-reuse exports
+  remain independent of server availability.
+- Verify downloaded audio with existing FFmpeg and leave shared server results
+  to server cache retention instead of deleting another client's possible result.
+- Added an audio-reuse output folder choice: preserve Current original packages
+  subfolders by default, or place all resulting FeedPaks in a single folder.
+  Previews reserve distinct filenames and retain existing-output verification.
+- Serve the audio-reuse helper from the host-supported plugin assets directory.
+- Added a separate reviewed batch job to reuse finished MinusMix audio with
+  freshly converted or repaired charts, without separation or audio encoding.
+- Detect removed-stem combinations from mixed donor folders and propose separate,
+  correctly named outputs for each matching variant. Duplicate recording review
+  stays within each variant, and progress separates input songs from output variants.
+- Require a fresh scan for earlier No Guitar-only reuse previews while retaining
+  saved records and preserving source packages and existing outputs.
+- Added repair-tolerant version/timeline matching, grouped recording choices,
+  bounded workers, exact member verification, no-overwrite publication and
+  resumable completion receipts. Both source folder trees remain read-only.
 
 ## 0.6.2 - 2026-09-04
 
