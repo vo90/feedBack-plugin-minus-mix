@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Build backing tracks by summing retained stems instead of subtracting quieter
+  separated audio from the original. Multiple exclusions use the same rule.
+- Require a complete coherent six-stem set, validate decoded timelines and peaks,
+  and preserve dynamics with constant clipping attenuation only when necessary.
+- Record the render method and source identity. Batch scans preserve legacy
+  exports and create numbered replacements instead of silently skipping them.
+
 - Reuse Stem Splitter's active receipt-verified managed FFmpeg pair when a
   source-based FeedBack runtime has no bundled FFmpeg. Batch and single-song
   controls now show the exact FFmpeg blocker and remain fail-closed until it is

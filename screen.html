@@ -138,7 +138,7 @@
         <details class="pmx-advanced">
           <summary>Advanced skip settings</summary>
           <div class="pmx-options">
-            <label class="pmx-option"><input id="pmx-batch-skip-existing" type="checkbox" checked> Skip outputs already created</label>
+            <label class="pmx-option"><input id="pmx-batch-skip-existing" type="checkbox" checked> Skip matching stem-sum outputs</label>
             <label class="pmx-option"><input id="pmx-batch-skip-derived" type="checkbox" checked> Skip songs already produced by MinusMix</label>
           </div>
         </details>
@@ -224,8 +224,9 @@
 
   <details class="pmx-details">
     <summary>How the audio is made</summary>
-    <p>For a normal single-stem source, this optional plugin connects directly to the managed local server you started from Stem Splitter and downloads the selected audio into a temporary workspace. Remote/custom servers, Docker sidecars and Stem Splitter's in-app engines are not supported yet. MinusMix subtracts that temporary stem from the original full mix, encodes once to Ogg Vorbis, and deletes the whole temporary separation. It never adds those stems to your original package.</p>
-    <p>If the source already contains the selected stem, MinusMix reuses it and skips the server. Charts, lyrics, artwork and metadata are copied into a new FeedPak containing only the rendered full mix.</p>
+    <p>MinusMix combines the separated instrument stems you keep into one backing track. For No Guitar, it mixes bass, drums, vocals, piano and other. The original recording and excluded stems are never added to this mix.</p>
+    <p>A complete saved six-stem set can be reused without the server. Otherwise MinusMix requests a complete set from Stem Splitter's managed local server. It checks timing, preserves relative stem levels, and reduces the whole mix only when needed to prevent clipping. Charts, lyrics, artwork and metadata are copied into a new FeedPak. Temporary audio is deleted after each export.</p>
+    <p>Older subtraction-based exports remain untouched. Batch conversion creates numbered replacements and skips only matching exports made with the current mixing method. Reusing existing audio copies its original sound; it does not improve old guitar removal.</p>
     <p>Batch mode runs one GPU separation at a time for stability. Each song's temporary separation is deleted before the next song, while engines that support a persistent model can keep the model itself warm between songs.</p>
     <p>AI separation is not mathematically perfect: faint bleed can remain, and sounds incorrectly placed in an excluded stem can also be reduced.</p>
   </details>

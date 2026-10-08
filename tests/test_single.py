@@ -24,6 +24,7 @@ def _wait(manager: single.SingleExportManager, job_id: str, timeout: float = 3.0
 
 
 class CompletingExporter:
+    plan_stems = staticmethod(lambda info, selected: None)
     @staticmethod
     def inspect_source(source: Path):
         return SimpleNamespace(title="Test Song")
@@ -141,13 +142,14 @@ def test_cancel_after_atomic_publication_keeps_single_export_completed(
         "artist": "Test Artist",
         "stems": [
             {"id": "full", "file": "stems/full.ogg"},
-            {"id": "guitar", "file": "stems/guitar.ogg"},
+            *[{"id": stem, "file": f"stems/{stem}.ogg"} for stem in exporter.MIX_STEMS],
         ],
     }
     with zipfile.ZipFile(source, "w") as archive:
         archive.writestr("manifest.yaml", yaml.safe_dump(manifest))
         archive.writestr("stems/full.ogg", b"full")
-        archive.writestr("stems/guitar.ogg", b"guitar")
+        for stem in exporter.MIX_STEMS:
+            archive.writestr(f"stems/{stem}.ogg", stem.encode())
     output_dir = tmp_path / "output"
     output_dir.mkdir()
     published = threading.Event()

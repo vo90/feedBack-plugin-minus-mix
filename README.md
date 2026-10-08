@@ -129,8 +129,9 @@ A fully split song gives you more control, but it also stores several
 full-length audio tracks and mixes them during playback. MinusMix creates a
 smaller, ready-to-play practice copy with your chosen instrument already
 removed. It uses less disk space, has less audio to load, always opens with the
-same mix, and may preserve more of the original sound than rebuilding the song
-from the remaining separated tracks.
+same mix. It combines the remaining separated tracks, matching the balance of
+those stems with the excluded instruments muted (apart from encoding and any
+constant reduction needed to prevent clipping).
 
 On my own system, I have also noticed a clear improvement in playback latency
 when using a normal single-track song instead of a multi-stem song, particularly
@@ -142,7 +143,7 @@ different.
 - The **FeedBack desktop app**.
 - The **Stem Splitter** plugin available in your FeedBack installation.
 - Stem Splitter's **managed local server and models** for songs that do not
-  already contain the selected stem audio.
+  already contain a complete six-stem set.
 - Enough free disk space for Stem Splitter's one-time server/model installation.
   The download is several gigabytes.
 
@@ -324,9 +325,9 @@ ignored.
 
 ### Do I always need the server?
 
-No. If the song already contains the selected stem audio, MinusMix reuses it
-and does not contact the server. If you are unsure, starting the server is the
-simplest option.
+No. If the song already contains all six instrument stems, MinusMix reuses
+the retained stems and does not contact the server. If you are unsure, starting
+the server is the simplest option.
 
 ### Can I remove more than one instrument?
 
@@ -339,31 +340,46 @@ completed output that has already been published is kept.
 
 ## Technical details
 
-For selected stems `S`, the rendered backing is:
+For excluded instruments `S`, the rendered backing is:
 
 ```text
-MinusMix output = original full mix - sum(S)
+MinusMix output = sum(all six instrument stems except S)
+No Guitar = bass + drums + vocals + piano + other
+No Guitar + Vocals = bass + drums + piano + other
 ```
 
-For an ordinary single-stem source, MinusMix calls the public HTTP API of Stem
-Splitter's managed loopback server. It requests the selected stems into a
-caller-owned temporary directory. The server may calculate all six sources
-internally, but MinusMix downloads only recognised requested outputs and never
-writes them into the source FeedPak.
+Neither the original full mix nor the excluded stems enter the rendering graph.
+This avoids the residual guitar caused by subtracting server-normalized stems
+from a louder original recording. Guitar bleed already present in a retained
+stem can remain, just as it does when muting guitar in Stem Splitter playback.
 
-If the source already contains the selected stems, MinusMix takes a server-free
-fast path. Otherwise, requested audio is streamed into the temporary workspace
-rather than buffered in memory. Interrupted files restart from byte zero, and
-FFmpeg verifies readable audio before it is used. MinusMix leaves shared server
-results to the server's bounded cache cleanup so another client or a reconnecting
-export can still retrieve them. Its own temporary separation directory is deleted
-after export.
+A complete saved six-stem set uses no server. Otherwise MinusMix requests all six
+sources from the public HTTP API of Stem Splitter's managed loopback server.
+This verifies that the model actually separates the excluded instruments, too.
+A partial saved set is never combined with a new separation. Missing, ambiguous,
+corrupt or incompatible stems cause an explicit error; there is no subtraction
+fallback. Keep at least one instrument selected for inclusion.
 
-The subtraction happens on decoded audio in FFmpeg. The playable mix and its
-optional preview are normally rendered together from one decode graph. An
-independent preview fallback preserves compatibility without failing the main
-export. The manifest is rewritten to one `full` stem, and the preview is rebuilt
-from the new audio.
+FFmpeg fully decodes the retained stems, verifies their durations, converts sample
+rates and mono/stereo channels to the source format, and sums them at unity gain into
+a temporary floating-point WAV. It does not average the inputs or normalize each
+stem. One constant gain reduction is applied only if needed for clipping safety.
+At most 1 ms of codec/resampling rounding is padded or trimmed at the tail; larger
+duration mismatches fail. The encoded output is checked again for duration and
+peaks. The preview comes from the same retained mix. A complete saved set
+can also be used when there is no original full mix in the package.
+
+Downloads are streamed and interrupted files restart from byte zero. Shared
+server results remain under the server's cache retention policy. All local
+intermediates are removed after each song, including failures and cancellation.
+
+New exports record `render_method: retained_stem_sum`, a render version, included
+and excluded stems, the source package fingerprint and the applied gain. With
+skip-existing enabled, batch mode skips only matching current-method exports.
+Legacy exports, changed sources and other filename collisions receive a new
+numbered output; nothing is overwritten. Regenerate old MinusMix songs from
+the original sources. The separate audio-reuse feature preserves a donor's
+existing audio and rendering provenance; copying old audio does not upgrade it.
 
 Every arrangement, lyric track, rig, cover and other non-stem asset is copied
 into the new package. Applying MinusMix repeatedly to an already derived output
@@ -392,7 +408,7 @@ is discouraged because each generation includes another lossy audio encode.
   A future breaking public API change may require a client update.
 - Converting an unsplit FeedPak requires the selected local server and requested
   model outputs; temporary startup/update states can wait automatically.
-- A FeedPak with the selected saved stems does not require the server.
+- A FeedPak with a complete saved six-stem set does not require the server.
 - Remote/custom servers, Docker sidecars and Stem Splitter's in-app engines are
   outside the current MinusMix support scope.
 

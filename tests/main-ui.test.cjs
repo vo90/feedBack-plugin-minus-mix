@@ -144,26 +144,21 @@ async function admissionChecks() {
     env.ui.createExport(); env.ui.startBatch(); await tick();
     assert.equal(env.calls.length, 0, 'Hard denial cannot submit through a stale click');
   }
-  env.ui.state.sourceInfo.stems[0].requires_separation = false;
+  env.ui.state.sourceInfo.stems = ['guitar', 'bass', 'drums', 'vocals', 'piano', 'other'].map(id => ({ id, saved: true }));
   setScan(env, []); env.ui.updateReady(); env.ui.updateBatchReady();
   assert.equal(node(env, 'export').disabled, false, 'Saved stems are independent of server availability');
   assert.equal(node(env, 'batch-start').disabled, false);
   assert.match(node(env, 'engine-text').textContent, /not required/);
   assert.equal(env.calls.length, 0, 'Readiness decisions do not contact the separator');
 
-  env.ui.state.sourceInfo.stems = [{ id: 'guitar', requires_separation: true },
-    { id: 'piano', requires_separation: false }];
-  env.singleStems.push({ value: 'piano', checked: true });
-  env.batchStems.push({ value: 'piano', checked: true });
-  env.ui.state.separation = { ready: true, model: 'four-stem', supported_stems: ['guitar', 'bass'] };
-  setScan(env); env.ui.updateReady(); env.ui.updateBatchReady();
-  assert.equal(node(env, 'export').disabled, false, 'An unsupported saved stem does not need the model');
-  assert.equal(node(env, 'batch-start').disabled, false, 'Aggregate missing stems governs truncated scan');
-  env.ui.state.sourceInfo.stems[1].requires_separation = true;
-  setScan(env, ['guitar', 'piano']); env.ui.updateReady(); env.ui.updateBatchReady();
-  assert.equal(node(env, 'export').disabled, true);
+  env.ui.state.sourceInfo.stems = [{ id: 'guitar', saved: true }];
+  env.ui.state.separation = { ready: true, model: 'four-stem', supported_stems: ['drums', 'bass', 'vocals', 'other'] };
+  setScan(env, ['guitar', 'bass', 'drums', 'vocals', 'piano', 'other']);
+  env.ui.updateReady(); env.ui.updateBatchReady();
+  assert.equal(node(env, 'export').disabled, true, 'a partial saved set needs the full model inventory');
   assert.equal(node(env, 'batch-start').disabled, true);
-  assert.match(node(env, 'summary-detail').textContent, /four-stem.*does not provide piano/);
+  assert.match(node(env, 'summary-detail').textContent, /four-stem.*does not provide guitar, piano/);
+
 }
 
 async function singleChecks() {

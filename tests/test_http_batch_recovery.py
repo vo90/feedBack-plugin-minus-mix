@@ -100,9 +100,9 @@ def _interrupted_service(audio):
                     return None
                 return self.reply({
                     "job_id": job_id, "status": "complete", "progress": 100,
-                    "stems": {"guitar": f"/download/{job_id}/guitar.ogg"},
+                    "stems": {stem: f"/download/{job_id}/{stem}.ogg" for stem in exporter.MIX_STEMS},
                 })
-            if self.path.startswith("/download/") and self.path.endswith("/guitar.ogg"):
+            if self.path.startswith("/download/") and self.path.endswith(".ogg"):
                 self.send_response(200)
                 self.send_header("Content-Type", "audio/ogg")
                 self.send_header("Content-Length", str(len(audio)))
@@ -116,7 +116,7 @@ def _interrupted_service(audio):
             request = urlsplit(self.path)
             if request.path != "/separate":
                 return self.reply({"detail": "not found"}, 404)
-            if parse_qs(request.query) != {"model": ["bs_roformer_sw"], "stems": ["guitar"]}:
+            if parse_qs(request.query) != {"model": ["bs_roformer_sw"], "stems": [",".join(exporter.MIX_STEMS)]}:
                 return self.reply({"detail": "unexpected model or stems"}, 422)
             with lock:
                 calls["POST /separate"] += 1

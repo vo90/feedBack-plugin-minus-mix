@@ -296,6 +296,9 @@ def inspect_package(path, *, donor=False, cancel=None, include_payload=False, st
             "arrangements": sorted(arrangements), "audio": audio,
             "derived": bool(marker), "policy": POLICY,
             "excluded_stems": excluded_stems,
+            "render_provenance": {key: marker[key] for key in (
+                "render_method", "render_version", "included_stems", "output_gain", "source_sha256"
+            ) if isinstance(marker, dict) and key in marker},
             "variant_suffix": variant_suffix(excluded_stems, stem_label=stem_label) if excluded_stems else None,
             "manifest_sha256": manifest_sha, "payload_hashes": payload}
 

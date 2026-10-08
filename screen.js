@@ -2,6 +2,17 @@
 (function (root) {
   'use strict';
 
+  var MIX_STEMS = ['guitar', 'bass', 'drums', 'vocals', 'piano', 'other'];
+
+  function requiredMixStems(info) {
+    if (!info) return [];
+    var inventory = info.mix_stems || MIX_STEMS;
+    var saved = (info.stems || []).filter(function (stem) { return stem.saved; })
+      .map(function (stem) { return stem.id; });
+    return inventory.every(function (stem) { return saved.indexOf(stem) >= 0; })
+      ? [] : inventory.slice();
+  }
+
   function sourceResultIsCurrent(requestId, currentRequestId) {
     return requestId === currentRequestId;
   }
@@ -43,7 +54,7 @@
         kind: 'not-needed',
         text: contextKnown
           ? 'The managed local Stem Splitter server is not required for the current selection.'
-          : 'The managed local Stem Splitter server is only required when selected audio is not already saved.',
+          : 'The managed local Stem Splitter server is required unless a complete stem set is already saved.',
       };
     }
     var admission = separationAdmission(true, engine, requiredStems);
@@ -113,6 +124,7 @@
     if (typeof module !== 'undefined' && module.exports) {
       module.exports = {
         sourceResultIsCurrent, resolvedSourceSelection,
+        requiredMixStems,
         engineStatusPresentation, separationAdmission, nextTabIndex, createApiClient,
       };
     }
@@ -299,11 +311,7 @@
   }
 
   function selectionRequiredStems(stems) {
-    if (!state.sourceInfo || !Array.isArray(state.sourceInfo.stems)) return [];
-    return stems.filter(function (stemId) {
-      var meta = state.sourceInfo.stems.find(function (stem) { return stem.id === stemId; });
-      return !!(meta && meta.requires_separation);
-    });
+    return stems.length ? requiredMixStems(state.sourceInfo) : [];
   }
 
   function selectionNeedsSeparation(stems) {
@@ -314,12 +322,9 @@
     if (!scan) return [];
     if (Array.isArray(scan.required_separation_stems)) return scan.required_separation_stems;
     // Older scan payloads have no aggregate; only inspect rows that need AI.
-    return selectedBatchStems().filter(function (stem) {
-      return (scan.items || []).some(function (item) {
-        return item.scan_status === 'ready' && item.needs_separation
-          && (item.saved_stems || []).indexOf(stem) < 0;
-      });
-    });
+    return (scan.items || []).some(function (item) {
+      return item.scan_status === 'ready' && item.needs_separation;
+    }) ? MIX_STEMS.slice() : [];
   }
 
   function renderEngineStatus() {
@@ -357,6 +362,7 @@
     var admission = separationAdmission(needsSeparation, state.separation, selectionRequiredStems(stems));
     var engineOkay = admission.allowed;
     var ready = !!state.selectedFilename && !!state.sourceInfo && stems.length > 0
+      && stems.length < MIX_STEMS.length
       && !!outputFolder() && !state.busy && !state.batchActive && state.ffmpegAvailable && engineOkay;
     var button = $('pmx-export');
     if (button) button.disabled = !ready;
@@ -378,7 +384,7 @@
     } else if (state.busy) {
       title.textContent = 'Creating MinusMix FeedPak…';
       detail.textContent = (needsSeparation ? 'Temporarily separating, then rendering' : 'Rendering')
-        + ' the full mix minus ' + stems.map(labelFor).join(' + ') + '. The source remains untouched.';
+        + ' the retained stems, excluding ' + stems.map(labelFor).join(' + ') + '. The source remains untouched.';
     } else if (ready) {
       title.textContent = 'Create “No ' + stems.map(labelFor).join(' + ') + '” copy';
       detail.textContent = 'Single-stem output • native backing playback • source preserved'
@@ -386,6 +392,9 @@
       if (needsSeparation && state.separation.waitable && !state.separation.ready) {
         detail.textContent += ' • waits for the server and continues automatically';
       }
+    } else if (stems.length === MIX_STEMS.length) {
+      title.textContent = 'Keep at least one instrument';
+      detail.textContent = 'The backing track needs at least one retained stem.';
     } else if (!state.ffmpegAvailable) {
       title.textContent = 'FFmpeg is unavailable';
       detail.textContent = ffmpegUnavailableReason();
@@ -733,7 +742,8 @@
   function updateBatchReady() {
     renderEngineStatus();
     var options = batchOptions();
-    var hasBasics = !!options.input_dir && !!options.output_dir && options.excluded_stems.length > 0;
+    var hasBasics = !!options.input_dir && !!options.output_dir && options.excluded_stems.length > 0
+      && options.excluded_stems.length < MIX_STEMS.length;
     var currentScan = state.batchScanKey === batchOptionsKey() ? state.batchScan : null;
     var needsSeparation = !!(currentScan && currentScan.counts && currentScan.counts.needs_separation);
     var admission = separationAdmission(needsSeparation, state.separation,
@@ -1221,6 +1231,7 @@
     if (state.busy || state.batchActive) return;
     var stems = selectedStems();
     if (!state.selectedFilename || !stems.length || !outputFolder()) return;
+    if (stems.length === MIX_STEMS.length) return;
     if (!state.ffmpegAvailable) {
       showStatus('error', ffmpegUnavailableReason());
       updateReady();
@@ -1236,7 +1247,7 @@
     state.singleDetail = '';
     updateReady();
     showStatus('info', selectionNeedsSeparation(stems)
-      ? 'Separating ' + stems.map(labelFor).join(' + ') + ' temporarily, then creating the single-stem feedpak. This can take several minutes…'
+      ? 'Obtaining a complete stem set, then mixing the instruments you kept. This can take several minutes…'
       : 'Rendering audio and packaging a new feedpak…');
     apiClient.startExport({
       filename: state.selectedFilename,

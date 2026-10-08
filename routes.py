@@ -263,7 +263,7 @@ class MinusMixAPI:
         supported = list(
             getattr(self.separator_module, "SUPPORTED_STEMS", DEFAULT_TARGETS)
         )
-        target_ids = list(dict.fromkeys([*supported, *saved.keys()]))
+        target_ids = supported
         return {
             "filename": filename,
             "title": info.title,
@@ -279,6 +279,9 @@ class MinusMixAPI:
                 for stem_id in target_ids
             ],
             "already_split": bool(saved),
+            "mix_stems": list(self.exporter.MIX_STEMS),
+            "complete_saved_stems": set(self.exporter.MIX_STEMS).issubset(saved)
+                and not (set(saved) - set(self.exporter.MIX_STEMS)),
             "arrangements": list(info.arrangements),
             "derived_exclusions": list(info.derived_exclusions),
         }

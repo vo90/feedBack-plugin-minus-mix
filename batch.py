@@ -10,6 +10,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import re
 import threading
 import time
 import uuid
@@ -254,6 +255,39 @@ def _reserve_output(desired: Path, reserved: set[str], *, avoid_existing: bool) 
     raise BatchError("could not find an unused output filename")
 
 
+def _output_index(directory):
+    """Index a destination once per scan, including numbered files after gaps."""
+    index = {}
+    if not directory.is_dir():
+        return index
+    for path in directory.iterdir():
+        index.setdefault(path.name.casefold(), []).append((1, path))
+        match = re.fullmatch(r"(.+) \((\d+)\)", path.stem)
+        if match and int(match[2]) >= 2:
+            key = (match[1] + path.suffix).casefold()
+            index.setdefault(key, []).append((int(match[2]), path))
+    return index
+
+
+def _conversion_target(exporter, source, desired, selected, reserved, skip_existing, indexes):
+    """Preserve old/different files and find a matching render or a free name."""
+    if skip_existing:
+        if desired.parent not in indexes:
+            indexes[desired.parent] = _output_index(desired.parent)
+        candidates = indexes[desired.parent].get(desired.name.casefold(), [])
+        source_digest = None
+        for number, candidate in sorted(candidates):
+            key = str(candidate).casefold()
+            if key in reserved or not candidate.is_file():
+                continue
+            source_digest = source_digest or exporter.source_fingerprint(source)
+            if exporter.is_current_output(candidate, source, selected, source_digest):
+                reserved.add(key)
+                return candidate, number > 1, True
+    candidate, renamed = _reserve_output(desired, reserved, avoid_existing=True)
+    return candidate, renamed, False
+
+
 def scan_sources(exporter, input_dir: str, output_dir: str, excluded_stems,
                   *, recursive: bool = True, skip_existing: bool = True,
                   skip_derived: bool = True, preserve_structure: bool = True,
@@ -289,6 +323,7 @@ def scan_sources(exporter, input_dir: str, output_dir: str, excluded_stems,
 
     items: list[dict] = []
     targets: set[str] = set()
+    output_indexes: dict = {}
     required_separation_stems: set[str] = set()
     counts = {
         "found": len(files), "ready": 0, "needs_separation": 0,
@@ -315,7 +350,7 @@ def scan_sources(exporter, input_dir: str, output_dir: str, excluded_stems,
             item["artist"] = info.artist
             saved = {stem.id for stem in info.stems if stem.id != "full"}
             item["saved_stems"] = sorted(saved)
-            missing = [stem for stem in selected if stem not in saved]
+            missing = exporter.plan_stems(info, selected).requested
             item["needs_separation"] = bool(missing)
             if skip_derived and _looks_derived(info, source, exporter, selected):
                 item["scan_status"] = "skipped"
@@ -326,19 +361,21 @@ def scan_sources(exporter, input_dir: str, output_dir: str, excluded_stems,
                     output_root, relative, bool(preserve_structure),
                 )
                 first_choice = exporter.desired_output_path(destination_dir, source, selected)
-                desired, renamed = _reserve_output(
-                    first_choice, targets, avoid_existing=not bool(skip_existing),
+                desired, renamed, current = _conversion_target(
+                    exporter, source, first_choice, selected, targets, bool(skip_existing), output_indexes,
                 )
                 item["output_relative"] = desired.relative_to(output_root).as_posix()
                 item["output_name_collision"] = renamed
                 if renamed:
                     counts["renamed_collisions"] += 1
 
-                if skip_existing and desired.exists():
+                if current:
                     item["scan_status"] = "skipped"
-                    item["reason"] = "output already exists"
+                    item["reason"] = "matching stem-sum output already exists"
                     counts["skipped_existing"] += 1
                 else:
+                    if renamed:
+                        item["reason"] = "existing files preserved; creating a new stem-sum output"
                     counts["ready"] += 1
                     if missing:
                         counts["needs_separation"] += 1
@@ -1031,7 +1068,8 @@ class BatchManager:
                 raise BatchError("unsafe output subfolder")
             output_dir = planned_output.parent
             output_dir.mkdir(parents=True, exist_ok=True)
-            if context.skip_existing and planned_output.exists():
+            if (context.skip_existing and self.exporter.is_current_output(
+                    planned_output, source, context.selected)):
                 with self.lock:
                     item = self.jobs[context.job_id]["items"][index]
                     item.update({

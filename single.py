@@ -143,6 +143,7 @@ class SingleExportManager:
         prepare = getattr(self.exporter, "prepare_source", None)
         prepared_source = prepare(source) if callable(prepare) else None
         info = prepared_source.info if prepared_source is not None else self.exporter.inspect_source(source)
+        self.exporter.plan_stems(info, selected)
         job_id = uuid.uuid4().hex
         job = {
             "id": job_id,

@@ -15,13 +15,14 @@ import yaml
 import batch
 import exporter
 import single
+from tests.test_batch import _completed
 
 
 def _pak(path: Path, *, full=b"full", guitar=False, derived=False) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     stems = [{"id": "full", "file": "stems/full.ogg"}]
     if guitar:
-        stems.append({"id": "guitar", "file": "stems/guitar.ogg"})
+        stems.extend({"id": stem, "file": f"stems/{stem}.ogg"} for stem in exporter.MIX_STEMS)
     manifest = {"title": path.stem, "artist": "Test", "stems": stems}
     if derived:
         manifest["minus_mix"] = {"excluded_stems": ["guitar"], "generator": "minus_mix"}
@@ -29,7 +30,8 @@ def _pak(path: Path, *, full=b"full", guitar=False, derived=False) -> Path:
         archive.writestr("manifest.yaml", yaml.safe_dump(manifest))
         archive.writestr("stems/full.ogg", full)
         if guitar:
-            archive.writestr("stems/guitar.ogg", b"guitar")
+            for stem in exporter.MIX_STEMS:
+                archive.writestr(f"stems/{stem}.ogg", stem.encode())
     return path
 
 
@@ -37,6 +39,9 @@ class ProviderExporter:
     """Use real source inspection and exception wrapping, with no audio process."""
 
     ExportError = exporter.ExportError
+    plan_stems = staticmethod(exporter.plan_stems)
+    source_fingerprint = staticmethod(exporter.source_fingerprint)
+    is_current_output = staticmethod(exporter.is_current_output)
     inspect_source = staticmethod(exporter.inspect_source)
     desired_output_path = staticmethod(exporter.desired_output_path)
     stem_label = staticmethod(exporter.stem_label)
@@ -46,8 +51,7 @@ class ProviderExporter:
     def export_minus_mix(source, output_dir, selected, *, stem_provider,
                          progress_cb, cancel_cb, log):
         info = exporter.inspect_source(source)
-        saved = {stem.id for stem in info.stems}
-        missing = tuple(stem for stem in selected if stem not in saved)
+        missing = exporter.plan_stems(info, selected).requested
         with tempfile.TemporaryDirectory() as td:
             work = Path(td)
             mix = work / "full.ogg"
@@ -59,7 +63,7 @@ class ProviderExporter:
         cancel_cb()
         progress_cb("packaging", 0.9, "Creating package")
         target = exporter.desired_output_path(output_dir, source, selected)
-        target.write_bytes(b"completed test package")
+        _completed(target, source, selected)
         return SimpleNamespace(
             output_path=target, output_filename=target.name, title=info.title,
             excluded_stems=selected, temporary_separation_used=bool(missing),
@@ -377,24 +381,24 @@ def test_batch_rejects_hard_setup_error_before_queue_creation(tmp_path):
     assert service.calls == 0
 
 
-def test_batch_scan_advertises_only_missing_stems_for_ready_rows(tmp_path):
+def test_batch_scan_advertises_complete_inventory_for_incomplete_ready_rows(tmp_path):
     source_root, output_root = tmp_path / "sources", tmp_path / "outputs"
     output_root.mkdir()
-    _pak(source_root / "saved.feedpak", guitar=True)
+    _pak(source_root / "saved.feedpak", guitar=False)
     _pak(source_root / "skipped.feedpak", derived=True)
     scan = batch.scan_sources(ProviderExporter(), str(source_root), str(output_root),
                               ["guitar", "piano"], skip_derived=True)
-    assert scan["required_separation_stems"] == ["piano"]
+    assert scan["required_separation_stems"] == sorted(exporter.MIX_STEMS)
     limited = dict(scan, items=scan["items"][:1])
-    assert limited["required_separation_stems"] == ["piano"]
+    assert limited["required_separation_stems"] == sorted(exporter.MIX_STEMS)
 
 
 def test_batch_blocks_unsupported_missing_stem_without_blocking_saved_stem(tmp_path):
     service = ControlledService(status={"ready": True, "supported_stems": ["guitar"]})
     service.release.set()
-    manager, options, _output = _batch_case(tmp_path, service, saved=True)
+    manager, options, _output = _batch_case(tmp_path, service, saved=False)
     options["excluded_stems"] = ["guitar", "piano"]
-    with pytest.raises(batch.BatchError, match="does not provide: piano"):
+    with pytest.raises(batch.BatchError, match="does not provide:"):
         manager.start(**options)
     assert service.calls == 0
 
@@ -408,7 +412,7 @@ def test_batch_does_not_require_model_to_provide_saved_selected_stem(tmp_path):
     assert completed["status"] == "completed"
     assert completed["counts"]["done"] == 3
     assert completed["counts"]["failed"] == 0
-    assert service.calls == 3
+    assert service.calls == 0
 
 
 @pytest.mark.parametrize("find", [single._service_block, batch._service_block])

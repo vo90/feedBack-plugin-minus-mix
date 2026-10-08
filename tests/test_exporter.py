@@ -32,11 +32,11 @@ def _run(args: list[str]) -> None:
     assert result.returncode == 0, result.stderr.decode("utf-8", "replace")[-1000:]
 
 
-def _ogg_sine(path: Path, frequency: int, duration: float = 2.0) -> None:
+def _ogg_sine(path: Path, frequency: int, duration: float = 2.0, volume=1.0) -> None:
     _run([
         FFMPEG, "-hide_banner", "-nostdin", "-y",
         "-f", "lavfi", "-i", f"sine=frequency={frequency}:duration={duration}:sample_rate=44100",
-        "-c:a", "libvorbis", "-q:a", "7", str(path),
+        "-af", f"volume={volume}", "-c:a", "libvorbis", "-q:a", "7", str(path),
     ])
 
 
@@ -55,7 +55,11 @@ def _make_source(tmp_path: Path, *, unsafe_member: bool = False, include_guitar:
     guitar = tmp_path / "guitar.ogg"
     preview = tmp_path / "old-preview.ogg"
     _ogg_two_sines(full)
-    _ogg_sine(guitar, 440)
+    _ogg_sine(guitar, 440, volume=0.75)
+    bass = tmp_path / "bass.ogg"
+    silent = tmp_path / "silent.ogg"
+    _ogg_sine(bass, 110)
+    _ogg_sine(silent, 220, volume=0)
     _ogg_sine(preview, 440, duration=1.0)
     manifest = {
         "feedpak_version": "1.14.0",
@@ -63,7 +67,7 @@ def _make_source(tmp_path: Path, *, unsafe_member: bool = False, include_guitar:
         "artist": "Test Artist",
         "duration": 2.0,
         "arrangements": [{"id": "lead", "name": "Lead", "file": "arrangements/lead.json", "type": "guitar"}],
-        "stems": ([{"id": "guitar", "file": "stems/guitar.ogg", "default": True}]
+        "stems": ([{"id": stem, "file": f"stems/{stem}.ogg", "default": True} for stem in exporter.MIX_STEMS]
                   if include_guitar else []) + [
             {"id": "full", "file": "stems/full.ogg", "codec": "vorbis", "default": True},
         ],
@@ -79,7 +83,9 @@ def _make_source(tmp_path: Path, *, unsafe_member: bool = False, include_guitar:
         zf.writestr("cover.png", b"unchanged-cover-bytes")
         zf.write(full, "stems/full.ogg", compress_type=zipfile.ZIP_STORED)
         if include_guitar:
-            zf.write(guitar, "stems/guitar.ogg", compress_type=zipfile.ZIP_STORED)
+            for stem in exporter.MIX_STEMS:
+                audio = guitar if stem == "guitar" else bass if stem == "bass" else silent
+                zf.write(audio, f"stems/{stem}.ogg", compress_type=zipfile.ZIP_STORED)
         zf.write(preview, "preview.ogg", compress_type=zipfile.ZIP_STORED)
         if unsafe_member:
             zf.writestr("../outside.txt", b"must not be preserved")
@@ -133,20 +139,17 @@ def test_render_graphs_replace_decoder_timestamps_before_vorbis_encoding(
 
     monkeypatch.setattr(exporter, "_run_ogg_command", capture)
     full = tmp_path / "full.ogg"
-    guitar = tmp_path / "guitar.flac"
 
-    exporter._render_mix("ffmpeg", full, [guitar], tmp_path / "mix.ogg")
-    mix_graph = commands[-1][0][commands[-1][0].index("-filter_complex") + 1]
-    assert "amix=inputs=2:duration=first:dropout_transition=0:normalize=0[mixed]" in mix_graph
-    assert "[mixed]asetpts=N/SR/TB[out]" in mix_graph
+    exporter._render_mix("ffmpeg", full, tmp_path / "mix.ogg")
+    mix_graph = commands[-1][0][commands[-1][0].index("-af") + 1]
+    assert mix_graph.startswith("asetpts=N/SR/TB")
 
     assert exporter._render_mix_and_preview(
-        "ffmpeg", full, [guitar], tmp_path / "combined.ogg",
+        "ffmpeg", full, tmp_path / "combined.ogg",
         tmp_path / "preview.ogg", 120.0,
     ) is True
     combined_graph = commands[-1][0][commands[-1][0].index("-filter_complex") + 1]
-    assert "amix=inputs=2:duration=first:dropout_transition=0:normalize=0[mixedraw]" in combined_graph
-    assert "[mixedraw]asetpts=N/SR/TB[mixed]" in combined_graph
+    assert "[0:a]asetpts=N/SR/TB,volume=1[mixed]" in combined_graph
     assert "atrim=start=30.000:duration=30.000,asetpts=N/SR/TB" in combined_graph
 
     assert exporter._render_preview(
@@ -369,15 +372,17 @@ def test_single_stem_source_uses_temporary_separator_and_discards_its_outputs(tm
         def obtain(full_mix: Path, separation_dir: Path,
                    requested: tuple[str, ...], full_digest: str | None):
             assert full_mix.is_file()
-            assert requested == ("guitar",)
+            assert requested == exporter.MIX_STEMS
             assert full_digest == _sha256(full_mix)
             temporary_dirs.append(separation_dir)
-            guitar = separation_dir / "guitar.ogg"
-            _ogg_sine(guitar, 440)
-            # A six-stem engine may also return files the exporter did not request.
-            other = separation_dir / "drums.ogg"
-            _ogg_sine(other, 220)
-            return {"guitar": guitar, "drums": other}
+            produced = {}
+            for stem in requested:
+                path = separation_dir / f"{stem}.ogg"
+                _ogg_sine(path, 110 if stem == "bass" else 440,
+                          volume=0.75 if stem == "guitar" else 1 if stem == "bass" else 0)
+                produced[stem] = path
+            return produced
+
 
     result = exporter.export_minus_mix(
         source, out_dir, ["guitar"], stem_provider=TemporaryProvider(),

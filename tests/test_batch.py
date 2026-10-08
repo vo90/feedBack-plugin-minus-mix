@@ -23,7 +23,7 @@ def _pak(path: Path, *, full: bytes = b"same full audio", guitar: bool = False,
     path.parent.mkdir(parents=True, exist_ok=True)
     stems = [{"id": "full", "file": "stems/full.ogg"}]
     if guitar:
-        stems.append({"id": "guitar", "file": "stems/guitar.ogg"})
+        stems.extend({"id": stem, "file": f"stems/{stem}.ogg"} for stem in exporter.MIX_STEMS)
     manifest = {"title": path.stem, "artist": "Test", "stems": stems}
     if derived:
         manifest["minus_mix"] = {
@@ -33,7 +33,8 @@ def _pak(path: Path, *, full: bytes = b"same full audio", guitar: bool = False,
         zf.writestr("manifest.yaml", yaml.safe_dump(manifest, sort_keys=False))
         zf.writestr("stems/full.ogg", full)
         if guitar:
-            zf.writestr("stems/guitar.ogg", b"guitar")
+            for stem in exporter.MIX_STEMS:
+                zf.writestr(f"stems/{stem}.ogg", stem.encode())
     return path
 
 
@@ -41,8 +42,23 @@ def _hash(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _completed(path, source, selected=("guitar",)):
+    manifest = {"stems": [{"id": "full", "file": "stems/full.ogg"}], "minus_mix": {
+        "generator": "minus_mix", "excluded_stems": list(selected),
+        "included_stems": [s for s in exporter.MIX_STEMS if s not in selected],
+        "render_method": exporter.RENDER_METHOD, "render_version": exporter.RENDER_VERSION,
+        "source_sha256": exporter.source_fingerprint(source),
+    }}
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("manifest.yaml", yaml.safe_dump(manifest))
+        archive.writestr("stems/full.ogg", b"fake decoded elsewhere" * 10)
+
+
 class FakeExporter:
     ExportError = exporter.ExportError
+    plan_stems = staticmethod(exporter.plan_stems)
+    source_fingerprint = staticmethod(exporter.source_fingerprint)
+    is_current_output = staticmethod(exporter.is_current_output)
     inspect_source = staticmethod(exporter.inspect_source)
     desired_output_path = staticmethod(exporter.desired_output_path)
     stem_label = staticmethod(exporter.stem_label)
@@ -53,8 +69,7 @@ class FakeExporter:
                          progress_cb, cancel_cb, log):
         cancel_cb()
         info = exporter.inspect_source(source)
-        saved = {stem.id for stem in info.stems}
-        missing = tuple(stem for stem in selected if stem not in saved)
+        missing = exporter.plan_stems(info, selected).requested
         if missing:
             with tempfile.TemporaryDirectory() as td:
                 work = Path(td)
@@ -76,7 +91,7 @@ class FakeExporter:
             target = wanted.with_name(f"{wanted.stem} ({number}){wanted.suffix}")
         else:
             raise AssertionError("fake exporter could not allocate an output name")
-        target.write_bytes(b"compact practice pak")
+        _completed(target, source, selected)
         return SimpleNamespace(
             output_path=target, output_filename=target.name,
             temporary_separation_used=bool(missing),
@@ -132,7 +147,7 @@ def test_recursive_scan_preserves_structure_and_skips_existing_derived_and_inval
     _pak(output_root / "old-output.feedpak")
     expected = exporter.desired_output_path(output_root / "Band", normal, ["guitar"])
     expected.parent.mkdir(parents=True, exist_ok=True)
-    expected.write_bytes(b"already done")
+    _completed(expected, normal)
 
     result = batch.scan_sources(
         exporter, str(source_root), str(output_root), ["guitar"],

@@ -95,6 +95,7 @@ def _manifest(fresh_manifest, fresh, donor, match, *, stem_label=None):
         manifest["preview"] = preview
         replacement[preview] = audio["preview"]
     manifest["minus_mix"] = {
+        **copy.deepcopy(donor.get("render_provenance", {})),
         "excluded_stems": excluded_stems, "source_title": fresh["title"],
         "generator": "minus_mix", "audio_reuse": {
             "policy": match.POLICY, "plan_key": plan_key(fresh, donor, match),
