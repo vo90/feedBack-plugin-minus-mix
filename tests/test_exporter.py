@@ -142,21 +142,21 @@ def test_render_graphs_replace_decoder_timestamps_before_vorbis_encoding(
 
     exporter._render_mix("ffmpeg", full, tmp_path / "mix.ogg")
     mix_graph = commands[-1][0][commands[-1][0].index("-af") + 1]
-    assert mix_graph.startswith("asetpts=N/SR/TB")
+    assert mix_graph.startswith("asettb=1/sr,asetpts=N")
 
     assert exporter._render_mix_and_preview(
         "ffmpeg", full, tmp_path / "combined.ogg",
         tmp_path / "preview.ogg", 120.0,
     ) is True
     combined_graph = commands[-1][0][commands[-1][0].index("-filter_complex") + 1]
-    assert "[0:a]asetpts=N/SR/TB,volume=1[mixed]" in combined_graph
-    assert "atrim=start=30.000:duration=30.000,asetpts=N/SR/TB" in combined_graph
+    assert "[0:a]asettb=1/sr,asetpts=N,volume=1[mixed]" in combined_graph
+    assert "atrim=start=30.000:duration=30.000,asettb=1/sr,asetpts=N" in combined_graph
 
     assert exporter._render_preview(
         "ffmpeg", full, tmp_path / "fallback-preview.ogg", 120.0,
     ) is True
     preview_filter = commands[-1][0][commands[-1][0].index("-af") + 1]
-    assert preview_filter.startswith("asetpts=N/SR/TB,")
+    assert preview_filter.startswith("asettb=1/sr,asetpts=N,")
 
 
 def test_atomic_publish_retries_if_first_output_appears_during_publication(

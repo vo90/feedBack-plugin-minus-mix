@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.8.1 - 2026-10-16
+
+- Accept valid integer FLAC and WAV stems during audio validation. Analyze
+  samples in double precision so FFmpeg reports invalid-number counters while
+  retaining checks for non-finite samples, silent stems, and exact timelines.
+- Preserve exact sample counts during backing-track and preview encoding by
+  expressing timestamps directly in samples. This fixes one-sample rounding
+  losses at 44.1 kHz that could reject an otherwise valid export.
+- Add real-audio regressions for integer stem formats, invalid floating-point
+  samples, and exact Vorbis timing in both combined and separate render paths.
+- Existing completed 0.8.0 exports remain eligible for Skip existing; failed
+  songs can be retried without overwriting completed output files.
+
 ## 0.8.0 - 2026-10-08
 
 - Build backing tracks by summing retained stems instead of subtracting quieter

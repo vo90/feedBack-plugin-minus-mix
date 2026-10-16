@@ -389,9 +389,12 @@ class AudioInfo:
 
 def _analyze_audio(ffmpeg, path, cancel_cb=None):
     """Decode fully, including silent tracks, without depending on ffprobe."""
+    # astats omits NaN/Inf counts for integer samples (including server FLAC).
+    # Analyze in double precision so those safety checks remain mandatory for
+    # every input format, without changing its rate, channels or sample count.
     code, raw = _audio_process([
         ffmpeg, "-hide_banner", "-nostdin", "-xerror", "-i", str(path),
-        "-map", "0:a:0", "-af", "ashowinfo,astats=measure_perchannel=none:"
+        "-map", "0:a:0", "-af", "aformat=sample_fmts=dbl,ashowinfo,astats=measure_perchannel=none:"
         "measure_overall=Peak_level+Number_of_samples+Number_of_NaNs+Number_of_Infs:reset=0",
         "-f", "null", "-",
     ], cancel_cb)
@@ -434,10 +437,10 @@ def _sum_stems(ffmpeg, retained, output, reference, cancel_cb):
                         else "pan=stereo|c0=c0|c1=c0,")
         inputs += (f"[{index}:a]aresample={expected.rate},{channels}"
                    f"apad=whole_len={expected.frames},atrim=end_sample={expected.frames},"
-                   f"asetpts=N/SR/TB[s{index}];")
+                   f"asettb=1/sr,asetpts=N[s{index}];")
     inputs += "".join(f"[s{index}]" for index in range(len(retained)))
     graph = inputs + (f"amix=inputs={len(retained)}:duration=longest:"
-                      "dropout_transition=0:normalize=0,asetpts=N/SR/TB[out]")
+                      "dropout_transition=0:normalize=0,asettb=1/sr,asetpts=N[out]")
     command.extend(["-filter_complex", graph, "-map", "[out]", "-map_metadata", "-1",
                     "-c:a", "pcm_f32le", "-rf64", "auto", str(output)])
     code, detail = _audio_process(command, cancel_cb)
@@ -488,9 +491,11 @@ def _run_ogg_command(command: list[str], output: Path | Iterable[Path], *, timeo
 
 def _render_mix(ffmpeg: str, full_mix: Path, output: Path,
                 cancel_cb: CancelCallback | None = None, gain: float = 1.0) -> None:
+    # Express timestamps directly in samples. N/SR/TB can round down by one
+    # sample at 44.1 kHz, shortening the final Vorbis granule position.
     cmd = [ffmpeg, "-hide_banner", "-nostdin", "-y", "-i", str(full_mix)]
     cmd.extend([
-        "-af", f"asetpts=N/SR/TB,volume={gain:.16g}",
+        "-af", f"asettb=1/sr,asetpts=N,volume={gain:.16g}",
         "-vn", "-sn", "-dn", "-map_metadata", "-1",
         "-c:a", "libvorbis", "-q:a", "5", str(output),
     ])
@@ -513,7 +518,7 @@ def _render_preview(ffmpeg: str, mix: Path, output: Path, duration_value,
         ffmpeg, "-hide_banner", "-nostdin", "-y", "-ss", f"{start:.3f}",
         "-i", str(mix), "-t", f"{clip:.3f}",
         "-af", (
-            f"asetpts=N/SR/TB,afade=t=in:st=0:d={fade:.3f},"
+            f"asettb=1/sr,asetpts=N,afade=t=in:st=0:d={fade:.3f},"
             f"afade=t=out:st={fade_out:.3f}:d={fade:.3f}"
         ),
         "-vn", "-sn", "-dn", "-map_metadata", "-1",
@@ -628,11 +633,11 @@ def _render_mix_and_preview(ffmpeg: str, full_mix: Path,
     start, clip, fade, fade_out = window
     cmd = [ffmpeg, "-hide_banner", "-nostdin", "-y", "-i", str(full_mix)]
     filters = [
-        f"[0:a]asetpts=N/SR/TB,volume={gain:.16g}[mixed]",
+        f"[0:a]asettb=1/sr,asetpts=N,volume={gain:.16g}[mixed]",
         "[mixed]asplit=2[fullout][previewbase]",
         (
             f"[previewbase]atrim=start={start:.3f}:duration={clip:.3f},"
-            f"asetpts=N/SR/TB,afade=t=in:st=0:d={fade:.3f},"
+            f"asettb=1/sr,asetpts=N,afade=t=in:st=0:d={fade:.3f},"
             f"afade=t=out:st={fade_out:.3f}:d={fade:.3f}[previewout]"
         ),
     ]
