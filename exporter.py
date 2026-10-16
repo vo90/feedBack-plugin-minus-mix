@@ -389,9 +389,12 @@ class AudioInfo:
 
 def _analyze_audio(ffmpeg, path, cancel_cb=None):
     """Decode fully, including silent tracks, without depending on ffprobe."""
+    # astats omits NaN/Inf counts for integer samples (including server FLAC).
+    # Analyze in double precision so those safety checks remain mandatory for
+    # every input format, without changing its rate, channels or sample count.
     code, raw = _audio_process([
         ffmpeg, "-hide_banner", "-nostdin", "-xerror", "-i", str(path),
-        "-map", "0:a:0", "-af", "ashowinfo,astats=measure_perchannel=none:"
+        "-map", "0:a:0", "-af", "aformat=sample_fmts=dbl,ashowinfo,astats=measure_perchannel=none:"
         "measure_overall=Peak_level+Number_of_samples+Number_of_NaNs+Number_of_Infs:reset=0",
         "-f", "null", "-",
     ], cancel_cb)
